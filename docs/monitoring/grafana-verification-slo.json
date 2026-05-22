@@ -1,0 +1,43 @@
+{
+  "title": "Tokenta Verification SLO",
+  "description": "Import into Grafana — scrape GET /metrics/prometheus (or JSON /api/v1/metrics/health).",
+  "prometheus_scrape": {
+    "job_name": "tokenta-verification",
+    "metrics_path": "/metrics/prometheus",
+    "scrape_interval": "30s"
+  },
+  "panels": [
+    {
+      "title": "SLO — STANDARD jobs under 60s (%)",
+      "target": "slo_standard_under_60s_pct",
+      "threshold": 99,
+      "unit": "percent"
+    },
+    {
+      "title": "Job duration p50 (ms)",
+      "target": "p50_duration_ms",
+      "threshold": 60000,
+      "unit": "ms"
+    },
+    {
+      "title": "Queue depth",
+      "target": "queue_depth",
+      "unit": "jobs"
+    },
+    {
+      "title": "Success rate (%)",
+      "target": "success_rate",
+      "unit": "percent"
+    },
+    {
+      "title": "LIVE monitor states",
+      "targets": ["monitor_live", "monitor_stale", "monitor_revoked"]
+    },
+    {
+      "title": "Provider limiter",
+      "targets": ["provider_limiter.active", "provider_limiter.queued"]
+    }
+  ],
+  "refresh": "30s",
+  "datasource_note": "Wire Prometheus scrape of /metrics/health or use JSON API datasource until exporter ships."
+}

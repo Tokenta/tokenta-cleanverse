@@ -1,0 +1,1380 @@
+================================================================================
+TOKENTA RUN VERIFICATION MECHANISM SPECIFICATION
+How [RUN VERIFICATION] Actually Proves an API Asset (v0.4)
+================================================================================
+Document type:  Mechanism / paradigm specification (implementation detail)
+Companion to:  tokenta-verification-engine-spec.txt (system architecture only)
+Date:           2026-05-19
+Status:         DESIGN ONLY — defines WHAT to run when user clicks RUN VERIFICATION
+                (Original status preserved; implementation progress annotated below.)
+
+================================================================================
+IMPLEMENTATION STATUS (annotated 2026-05-19 — original spec text unchanged below)
+================================================================================
+Tracking: docs/tokenta-verification-implementation-plan.txt
+Code:     server/src/verification/*, server/src/jobs/*, server/src/api/server.ts
+
+Section   Topic                              Status
+-------   --------------------------------   ------------------
+4G        Nonlinear probe envelope           [DONE] envelope.ts + tests
+4D        Calls-before-budget priority       [DONE] budget-enforcer.ts + tests
+4C        Lock state machine                 [DONE] lock-store.ts + audit-log on transition
+4B        Verification cache                 [DONE] cache-store.ts
+4.2B      MODEL_PIN_FALLBACK                 [DONE] data/model-pin-registry.json v1 + admin API
+4.2       Single-model rule                  [DONE] orchestrator
+4.3       Adaptive probe sizing              [DONE] envelope tiers
+4E        Cost liability split               [DONE] on job request (enum)
+4F        Abuse resistance (24h caps)        [DONE] abuse-guard.ts (2026-05-20)
+6.2–6.3   Quantity range output              [DONE] asset-scorer.ts
+9A        Three-score gating                 [DONE] asset-scorer.ts
+9B        DEGRADED terminal outcome          [DONE]
+5.1       OpenAI playbook                    [DONE] providers/openai.ts
+5.2       Anthropic L1+L2 messages probe     [DONE] providers/anthropic.ts (2026-05-20)
+5.3       Gemini L1+L2                       [DONE] providers/gemini.ts (2026-05-20)
+6.3       OVERCLAIMED buyback gate           [DONE] buyback-gate.ts (2026-05-20)
+12        LIVE continuous monitor            [PARTIAL 2026-05-21] split 5m Direct / 30m P2P + Redis leader lock + terminal facade
+18–19     Terminal disclosure copy           [DONE] ListApiModal + tour F2 + trading-types
+10        proofHash + on-chain anchor        [PARTIAL 2026-05-19] proof-anchor + viem calldata; testnet plan Base Sepolia (terminal-api-layer-plan.txt)
+F2.2      Proof composition metrics          [PARTIAL 2026-05-19] paradigms incl. ZK/TEE when ZK_TEE_ATTEST_MOCK
+14        Credential at-rest                 [PARTIAL 2026-05-19] vault + worker decrypt; zeroize after job (worker-zeroize.test)
+
+SYSTEM IDENTITY (v0.4):
+  Tokenta RUN VERIFICATION is a constrained stochastic inference engine for API
+  execution capacity — with economic throttling, adversarial safety controls, and
+  multi-dimensional asset scoring. It is NOT a quota checker, API ping tool, or
+  billing inspector.
+
+  One-line engineering definition:
+    Probabilistic inference of hidden variable "sustainable execution capacity now"
+    under bounded real API consumption.
+
+  Correct product sentence:
+    "We run minimal real API samples to estimate whether this key can likely
+     support the listing's capacity band — not your exact remaining balance."
+
+  Wrong product sentences (prohibited in UI/legal copy):
+    "We verify your remaining quota/balance."
+    "We will use up to 3% of your quota each verification." (misleading — see 4G)
+    "Zero-cost verification."
+
+CORE PRINCIPLE:
+  Consumption is unavoidable. Operational burn is capped by a nonlinear adaptive
+  probe envelope (4G) + absolute call fuses — NOT by linear % of declared quantity.
+  A separate consentDisclosureCeiling (formerly "3%") exists only for legal checkbox
+  wording and must NOT drive probe authorization (4D).
+
+Scope:          Provider probes, capacity inference, probe budgets, lock states,
+                liability modes, risk scoring, evidence artifacts.
+                Does NOT define queues, REST routing, or DB schema.
+
+================================================================================
+RELATIONSHIP TO OTHER DOCUMENTS
+================================================================================
+
+  tokenta-verification-engine-spec.txt
+    - Async jobs, SSE, workers, API endpoints, security lifecycle, phases
+    - Answers: "How does the platform orchestrate verification?"
+
+  THIS DOCUMENT (tokenta-run-verification-mechanism-spec.txt)
+    - Controlled sampling probes, capacity inference, lock state machine, liability
+    - Answers: "What exact samples prove authenticity and infer execution capacity?"
+
+  Terminal UI triggers covered:
+    - ListApiModal:  [LIST API · START VERIFY]  (terminal-flows.tsx SL.1)
+    - Product spec:  [RUN VERIFICATION TEST]     (SELL listing / buyback forms)
+    - F2 progress:   CONNECTIVITY -> QUOTA -> RATE_LIMIT -> RISK -> FINALIZE
+    - Buyback UI:    Test 1/3, 2/3, 3/3
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+  1.  Definition of RUN VERIFICATION
+  2.  Verification Mechanism Paradigm (Taxonomy)
+  3.  The Five-Layer Proof Model
+  4.  Global Probe Budget, Consent, and Anti-Burn Controls
+  4A. Verification Cost Model and Safety Boundaries
+  4B. Verification Result Cache (Reuse Within TTL)
+  4C. Hard Verification Lock State Machine (Anti-Drain)
+  4D. Hard Constraint Priority Order (Calls Before Budget)
+  4E. Verification Cost Liability Split
+  4F. Re-Verify Abuse Resistance
+  4G. Nonlinear Adaptive Probe Envelope (Operational Burn Cap)
+  4.2B MODEL_PIN_FALLBACK_POLICY (One-Level Equivalent Only)
+  5.  Provider Playbooks (Concrete Operations)
+  6.  Execution Capacity Inference (No Balance API)
+  7.  Rate Limit Discovery Mechanism
+  8.  Access-Method-Specific Mechanisms
+  9.  Decision Logic: PASS, FAIL, REVIEW, and Risk Scoring
+  9A. API Asset Scoring — Three Dimensions (Capability / Trust / Compliance)
+  9B. Terminal Outcomes: PASS, FAIL, REVIEW, DEGRADED
+  10. Evidence and Attestation Per Step
+  11. Failure Code Catalog (Mechanism-Level)
+  12. Continuous Verification (LIVE) Mechanism
+  13. Custom and OpenAI-Compatible Endpoints
+  14. Legal, ToS, and Provider Policy Constraints
+  15. Adapter Interface (Worker Implementation Contract)
+  16. Research Notes and Source Summary
+  17. Recommended Implementation Order
+  18. Seller-Facing Cost Disclosure (UI Copy Requirements)
+  19. Glossary: Terms to Use vs Avoid
+
+================================================================================
+1. DEFINITION OF RUN VERIFICATION
+================================================================================
+
+RUN VERIFICATION is not a single HTTP call. It is a bounded, auditable SEQUENCE of
+CONTROLLED SAMPLING against real provider APIs. Every probe that reaches the
+provider may consume request quota (RPM) and, for inference micro-probes, real
+input/output tokens charged to the seller's account.
+
+Product framing (mandatory in UI, legal, and support docs):
+  - NOT: "Zero-cost verification" | "Balance/quota verification" | "Exact remaining tokens"
+  - YES: "Verifiable execution-capacity inference via controlled sampling"
+
+Industry paradigm selected by Tokenta:
+  Paradigm 1 — Liveness only: unreliable; cannot infer execution capacity.
+  Paradigm 2 — Micro-probe sampling (THIS SPEC): industry standard; bounded token cost.
+  Paradigm 3 — Full workload simulation: prohibitively expensive; out of scope.
+
+Analogies (internal positioning only):
+  - Credit scoring sample pull (not full credit report)
+  - Fraud probe transaction (not full account drain)
+  - Ad impression sampling (not full campaign spend audit)
+
+Tokenta implements Paradigm 2 with: single-model lock, cache, adaptive sizing,
+lock state machine, and liability split — so the system cannot become a
+consumption attack surface against sellers.
+
+RUN VERIFICATION answers four questions:
+
+  Q1  AUTHENTICITY     Does this credential authenticate successfully right now?
+  Q2  EXEC CAPACITY    Can this key execute inference consistent with the listing claim?
+                      (probabilistic inference — NOT exact remaining balance)
+  Q3  USABILITY        Can the declared access method (direct key, proxy, rotation) work?
+  Q4  INTEGRITY        Is the seller's claim consistent with observed provider state?
+
+Outputs (mechanism layer, before marketplace binding):
+
+  estimatedExecutableQuantityRange   object   { min, max, band, unit } — PRIMARY quantity output
+  declaredAlignment                  enum     CONSISTENT | UNDERCLAIMED | OVERCLAIMED | UNVERIFIABLE
+  capabilityScore                    float    0.0-1.0 — can execute / sustain workload (9A)
+  trustScore                         float    0.0-1.0 — fraud/shared-key/gray-market (9A)
+  complianceScore                    float    0.0-1.0 — policy/region/ToS signals (9A)
+  executionCapacityBand              enum     UNKNOWN | INSUFFICIENT | SUFFICIENT | ABUNDANT
+  confidence                         enum     HIGH | MEDIUM | LOW (epistemic, not financial)
+  terminalOutcome                    enum     PASS | FAIL | REVIEW | DEGRADED (9B)
+  verificationMethod                 enum     DIRECT_KEY_TEST | PROXY_HEARTBEAT | ROTATION_VALIDATION
+                                         | LIVENESS_ONLY | DEGRADED_PARTIAL
+  costLiability                      enum     SELLER_PAID | PLATFORM_SUBSIDIZED | BUYER_TRIGGERED
+  probeManifest                      object   Forensic log: probes, tokensUsed, requestsUsed, cacheHit
+  verificationLockState              enum     See Section 4C (incl. PARTIAL_SUCCESS_DEGRADED)
+  failureCode                        string   Machine-readable if FAIL
+  failureMessage                     string   Human-readable for Terminal UI
+
+  DEPRECATED (do not emit as primary; marketplace migration only):
+  verifiedQuantity — point equality to declared is FORBIDDEN inference (v0.4).
+  capacityInferenceScore — alias of capabilityScore for backward compatibility.
+  riskScore — REMOVED as single gate; use trustScore + complianceScore (9A).
+
+The Terminal shows step-by-step progress. Each step maps to one or more probes from
+Section 2 paradigms. The worker MUST NOT return PASS without executing at least:
+
+  - One AUTH probe (Layer 1)
+  - One CAPACITY INFERENCE probe (Layer 2) OR documented LIVENESS_ONLY fallback
+  - One POLICY probe (rate/entitlement) when provider supports it and lock allows
+
+================================================================================
+2. VERIFICATION MECHANISM PARADIGM (TAXONOMY)
+================================================================================
+
+All provider verification reduces to seven probe paradigms. Every RUN VERIFICATION
+pipeline is a composition of these paradigms.
+
+------------------------------------------------------------------------------
+Paradigm A — LIVENESS AUTH (Near-Zero TOKEN Cost; May Consume REQUEST Quota)
+------------------------------------------------------------------------------
+Purpose:   Prove the key exists, is not revoked, and can reach the provider API.
+Typical:   GET /v1/models (OpenAI), GET models (Gemini), minimal list/health.
+           Anthropic: often combined with micro-probe (no public models list on all keys).
+Cost:      Usually 0 completion/input/output tokens billed.
+           DOES consume: RPM (requests per minute), and on some providers counts toward
+           request quota or daily call limits. Must be counted in probeManifest as
+           requestsUsed, not tokensUsed.
+Latency:   100-800 ms typical.
+Failure:   401 invalid key, 403 forbidden, 404 wrong base URL, timeout, TLS error.
+
+When to use:  ALWAYS as first probe after key ingest (unless valid cache hit — 4B).
+Tokenta step: CONNECTIVITY (Test 1/3 in buyback UI).
+
+------------------------------------------------------------------------------
+Paradigm B — ENTITLEMENT READ (Admin or Account Metadata)
+------------------------------------------------------------------------------
+Purpose:   Read organization tier, project, billing status, model allow-list.
+Typical:   OpenAI organization usage API (requires admin key), Anthropic usage API.
+Cost:      No inference tokens; may require separate admin credential (NOT seller key).
+Limitation: Often NOT available with seller-submitted project keys.
+
+When to use:  Platform inventory ingest, Tokenta Direct ops — not typical P2P seller flow.
+Fallback:     Skip with confidence penalty; rely on Paradigm C/D.
+
+------------------------------------------------------------------------------
+Paradigm C — INFERENCE MICRO-PROBE (SOLE Primary TOKEN Burn Source)
+------------------------------------------------------------------------------
+Purpose:   Prove the key can execute a real inference call; infer quota indirectly.
+Typical:   POST /chat/completions (or provider equivalent) with max_tokens=1-5.
+Cost:      REAL seller billing:
+             - input tokens (canonical prompt, typically ~15-25 tokens)
+             - output tokens (1-5 per probe)
+             This is the ONLY step that materially burns declared token quota.
+Latency:   500 ms - 5 s.
+
+When to use:  When Paradigm A passes, no valid verification cache (4B), and
+              adaptive rules (4, 4A) allow micro-probe (may be SKIPPED for tiny
+              declared quantities — see LOW_QUOTA_SKIP_MICRO_PROBE).
+Tokenta step: QUOTA (partial), also contributes to RATE_LIMIT headers.
+
+Critical design rules (MANDATORY — violation = design defect):
+  - EXACTLY ONE model per provider per verification job (Section 4.2)
+  - NO multi-model probing (e.g. gpt-4 + mini + fallback chain)
+  - NO fallback escalation on 404 model_not_found (FAIL MODEL_NOT_ENTITLED instead)
+  - Model selection: single cheapest model entitled AND consistent with listing
+    (one model id pinned at job start; never changed mid-job)
+  - Single canonical prompt hash across all verifications (reproducibility)
+  - max_tokens: default 5; adaptive 1-2 when declaredQuantity < 1000 (Section 4A)
+  - max micro-probe CALLS per job: 3 hard cap (often 1 sufficient)
+
+Example canonical prompt (hash pinned in proof):
+  "TOKENTA_VERIFY_v1 reply OK"
+
+------------------------------------------------------------------------------
+Paradigm D — TOKEN ACCOUNTING PROBE (Count / Usage Endpoint)
+------------------------------------------------------------------------------
+Purpose:   Measure tokens without full generation, or read usage from response.
+Typical:   Gemini countTokens; OpenAI response.usage on micro-probe.
+Cost:      Lower than full generation; Gemini countTokens often free or cheap.
+
+When to use:  Gemini (strong), OpenAI (via micro-probe usage object), Anthropic (usage in response).
+
+------------------------------------------------------------------------------
+Paradigm E — RATE LIMIT DISCOVERY (Headers First; Minimal Extra Calls)
+------------------------------------------------------------------------------
+Purpose:   Discover RPM/TPM boundaries; detect hard-zero quota accounts.
+Typical:   Parse x-ratelimit-* / anthropic-ratelimit-* from EXISTING probe responses.
+           Optional: at most ONE additional micro-probe IF budget remains AND
+           remaining-requests > 2 AND accumulatedProbeTokens + estimate <= budget.
+Cost:      Prefer 0 extra token burn (headers-only from L2 probe).
+           If optional 2nd call allowed: same single model, max_tokens 1-2 only.
+           NEVER unbounded burst, parallel storm, or retry-on-429 loops.
+
+When to use:  RATE_LIMIT step; flag accounts with limit: 0 (common on Gemini without billing).
+
+Tokenta step: RATE_LIMIT (Test 3/3 in buyback UI).
+
+PROHIBITED:  "Stress testing" via repeated 429 retries; multi-endpoint probing;
+             provider fallback cascade (OpenAI fail -> try Anthropic -> try Gemini).
+
+------------------------------------------------------------------------------
+Paradigm F — REVOCATION / ROTATION PROOF (Two-Key Compare)
+------------------------------------------------------------------------------
+Purpose:   Prove old key dead and new key live after sale.
+Typical:   Probe old fingerprint at T0; seller submits new key; probe old again at T1.
+Cost:      Two LIVENESS + two MICRO-PROBE cycles.
+
+When to use:  KEY_ROTATION_REQUIRED listings, buyback flow, order delivery.
+Tokenta step: ROTATION_VALIDATION access method; post-sale fraud monitor.
+[IMPLEMENTED 2026-05-20: rotation-runner.ts + fraud-monitor.ts + context=KEY_ROTATION jobs]
+
+------------------------------------------------------------------------------
+Paradigm G — PROXY HEARTBEAT (Non-Provider)
+------------------------------------------------------------------------------
+Purpose:   Verify Tokenta-issued proxy gateway, not seller's raw key to buyer.
+Typical:   Internal health check against edge proxy with session token.
+Cost:      Platform infra only.
+
+When to use:  TOKENTA_DIRECT inventory, PLATFORM_INVENTORY listings.
+Tokenta step: PROXY_HEARTBEAT; continuous LIVE monitor (5-30 min interval).
+
+================================================================================
+3. THE FIVE-LAYER PROOF MODEL
+================================================================================
+
+Each RUN VERIFICATION executes layers in order. Early exit on hard FAIL.
+
+  Layer   Name              Paradigms used          Terminal step
+  -----   ----------------  ----------------------  ------------------
+  L1      Connectivity      A                       CONNECTIVITY
+  L2      Capacity Inference B, C, D               QUOTA (UI label; not balance audit)
+  L3      Rate / Entitlement E (+ headers from C)   RATE_LIMIT
+  L4      Access Method     C, F, or G              (embedded in L2/L3 or post)
+  L5      Integrity / Risk  platform DB + heuristics RISK_ANALYSIS
+[IMPLEMENTED 2026-05-19 — partial] platform-risk.ts: L5 probe in manifest, 0 tokens;
+  custom/compatible + verify velocity + shared-key; full platform DB TBD
+
+Layer 4 runs in parallel or immediately after L2 depending on accessMethod:
+
+  DIRECT_KEY           L1 + L2 + L3 (no F until rotation order)
+  KEY_ROTATION_REQUIRED L1 + L2 + L3 at listing; F at delivery
+  PROXY_GATEWAY        G + L2 via platform pool key (seller key to platform only)
+
+================================================================================
+4. GLOBAL PROBE BUDGET, CONSENT, AND ANTI-BURN CONTROLS
+================================================================================
+
+UI consent (ListApiModal, terminal-flows.tsx) — liability-safe wording (Section 18):
+  "Tokenta runs a small fixed number of real API samples (typically under 100
+   tokens). You authorize this controlled check. We do not measure your exact
+   remaining balance."
+
+Mechanism enforcement (operational — Section 4G):
+
+  declaredQuantity = seller listing input (used for alignment checks, NOT linear burn %)
+  operationalMaxProbeTokens = computeProbeEnvelope(declaredQuantity)  // 4G
+  consentDisclosureCeiling  = min(ceil(declaredQuantity * 0.03), 5000)  // legal checkbox ONLY
+
+  CRITICAL — Hard Constraint Priority (Section 4D):
+    operationalMaxProbeTokens is a SOFT METER. It does NOT authorize extra probes.
+    maxProbeCalls and lock state ALWAYS win. Large declared quantities do NOT get
+    linearly larger probe budgets (fixes structural risk of v0.3 linear 3%).
+
+  Probe accounting (tokens toward operationalMaxProbeTokens):
+    - LIVENESS AUTH (A):       0 tokens (track requestsUsed separately)
+    - MICRO-PROBE (C):         input_tokens + output_tokens from response.usage
+    - countTokens (Gemini D):  tokens counted by API (prefer over generateContent)
+    - RATE optional extra (E): same rules as C; counts toward same caps
+    - ROTATION probes (F):     separate order-scoped budget, not listing 3%
+
+  Before EACH Paradigm C or optional E call, worker MUST check ALL of (4D order):
+    (1) verificationLockState allows L2/L3 probes (Section 4C)
+    (2) probeCallCount < maxProbeCalls (ABSOLUTE fuse)
+    (3) singleModelId unchanged since job start
+    (4) adaptive max_tokens profile respected (Section 4.3)
+    (5) no retry storm / abuse cooldown active (Sections 4.5, 4F)
+    (6) accumulatedProbeTokens + estimate <= operationalMaxProbeTokens (4G soft meter)
+    (7) costLiability authorized for this trigger (Section 4E)
+
+  If next probe would exceed budget:
+    - Prefer Paradigm D (countTokens) if cheaper and provider supports it
+    - If still insufficient: FAIL PROBE_BUDGET_EXCEEDED
+    - Optional seller flag allowPartialVerify: PASS with LOW confidence if L1 only
+      (documented in proof; never default-on for marketplace listing)
+
+------------------------------------------------------------------------------
+4.1 Physical Fuse (Hard Caps — Non-Negotiable Implementation Requirements)
+------------------------------------------------------------------------------
+
+These limits are the ONLY reliable protection against quota burn accidents.
+Percent-based budget alone is insufficient (3% of 10k is still 300 tokens; a buggy
+loop can burn 10k+ in seconds).
+
+  maxProbeTokens     <= operationalMaxProbeTokens (4G; NOT linear % of declared)
+  maxProbeCalls      <= 3                    // micro-probe + optional rate call
+  maxLivenessCalls   <= 2                    // includes one 429 retry max (4.5)
+  maxModelsPerJob    = 1                     // exactly one model id
+  maxWallTime        <= 90 s (STANDARD job)
+  maxRetriesPerStep  <= 1                    // per step, not per job cumulative storm
+
+Typical ACTUAL burn (correct implementation, declared=100,000 tokens):
+  L1: 0 tokens
+  L2: ~20 input + ~5 output = ~25 tokens x 1 call = ~25 tokens
+  L3: 0 extra (headers from L2) OR +~25 if one optional call
+  Total: ~25-75 tokens (within 4G envelope; % of declared varies, not policy driver)
+[IMPLEMENTED 2026-05-19] Automated tier QA: envelope-burn-simulation.test.ts (§4A.2 table rows).
+
+Failure mode burn (incorrect implementation — MUST NOT SHIP):
+  Multi-model matrix, unbounded retries, fallback cascade: 500-10,000+ tokens
+  => FAIL design review; treat as SEV-1 product defect
+
+------------------------------------------------------------------------------
+4.2 Single-Model Rule (No Escalation, No Fallback Matrix)
+------------------------------------------------------------------------------
+
+  ONLY 1 model per provider per verification job.
+
+  At job start, orchestrator pins probeModelId from:
+    - seller claimedModels[0] if entitled on L1 allow-list, else
+    - provider-default cheapest entitled model for that listing tier
+    - else one equivalent from MODEL_PIN_FALLBACK_POLICY (4.2B) — still ONE active id
+
+  FORBIDDEN:
+    - Probing multiple models for "better proof" or matrix testing
+    - Unregistered model hopping on 404/403
+    - On 429: switching model or provider
+    - "Escalation" from mini to flagship tier
+
+  ALLOWED (strict): one registered equivalent retry per 4.2B only.
+
+  Rationale: cost grows linearly with models; uncontrolled fallback grows exponentially.
+
+------------------------------------------------------------------------------
+4.2B MODEL_PIN_FALLBACK_POLICY (One-Level Equivalent Only)
+------------------------------------------------------------------------------
+
+Purpose: Reduce false negatives from model_not_entitled / region naming mismatch
+without reopening multi-model probe matrices.
+
+Rules:
+  - Pre-registered static mapping table per provider (versioned JSON, ops-maintained)
+  - At most ONE fallback attempt per job; consumes same maxProbeCalls budget
+  - Fallback ONLY when primary probe returns MODEL_NOT_ENTITLED or model_not_found
+  - Equivalent model MUST be: same tier class, on L1 allow-list, mapping entry exists
+  - Job still emits single effective probeModelId in proof (primary -> fallback chain)
+
+Example mappings (illustrative — not exhaustive):
+  OpenAI:  gpt-4o -> gpt-4o-mini (verify tier claim separately in L5)
+  Anthropic: claude-3-5-sonnet-* -> claude-3-5-haiku-* (same job, one retry)
+  Gemini:  gemini-1.5-pro -> gemini-1.5-flash
+
+FORBIDDEN in fallback:
+  - Trying >1 equivalent
+  - Cross-provider fallback
+  - Flagship escalation not in mapping table
+  - Fallback on QUOTA_EXHAUSTED or 429 (fail/lock instead)
+
+After fallback fails: FAIL MODEL_NOT_ENTITLED + TERMINAL_FAIL_LOCKED (4C).
+
+------------------------------------------------------------------------------
+4.3 Adaptive Probe Sizing (Small Quota Seller Protection)
+------------------------------------------------------------------------------
+
+Risk: seller declares 10,000 tokens but actual remaining balance is 50 tokens.
+A standard probe (~25 tokens) x 3 calls = 75 tokens can exhaust the key and
+trigger 402/insufficient_quota — seller perceives Tokenta as "eating my quota."
+
+Adaptive table (worker MUST apply before first micro-probe):
+
+  declaredQuantity (tokens)   max_tokens   maxProbeCalls   L2 strategy
+  -------------------------   ----------   -------------   ---------------------------
+  < 500                       1            1               L1 only OR 1 micro-probe;
+                                                           confidence LOW if L1-only
+  500 - 999                   1-2          1-2             1 micro-probe; skip L3 extra
+  1,000 - 9,999               2-3          2               1-2 micro-probes max
+  >= 10,000                   5 (default)  3               standard path
+
+  If seller enables allowPartialVerify and declared < 1000:
+    - May complete with L1 PASS + skip micro-probe => VERIFICATION_METHOD liveness_only
+    - Listing confidence capped at LOW; marketplace may require manual REVIEW
+
+  Pre-check: if L1 returns signals of near-zero quota (e.g. rate limit remaining
+  tokens = 0), SKIP micro-probe and FAIL QUOTA_EXHAUSTED or REVIEW — do not probe
+  into exhaustion.
+
+------------------------------------------------------------------------------
+4.4 Verification Result Cache (80-95% API Call Reduction)
+------------------------------------------------------------------------------
+
+See Section 4B for full specification. Summary:
+
+  Cache key:   hash(provider + keyFingerprint + declaredQuantityBucket + accessMethod)
+  TTL:         5 min (re-verify button, pre-purchase), 30 min (listing draft stable)
+  On hit:      Skip L1 and L2; return cached proof with status CACHED_VALID
+  On miss:     Full pipeline; store proof on PASS/REVIEW terminal states
+
+  LIVE continuous monitor: may use L1-only tick; full L2 micro-probe at most once
+  per 6h per key unless cache invalidated (revocation event, quantity change).
+
+------------------------------------------------------------------------------
+4.5 Anti-Retry-Storm and Rate-Limit Guards
+------------------------------------------------------------------------------
+
+  On HTTP 429:
+    - Read Retry-After if present; wait ONCE up to min(Retry-After, 15s)
+    - At most ONE retry per probe step
+    - If second 429: FAIL RATE_LIMITED (do NOT loop)
+    - NEVER fire parallel retries
+
+  On HTTP 5xx:
+    - Max 1 retry with exponential backoff cap 10s
+    - Then FAIL PROVIDER_OUTAGE
+
+  On insufficient_quota / 402 during micro-probe:
+    - FAIL QUOTA_EXHAUSTED immediately
+    - Do NOT retry with smaller model or different endpoint
+
+  Job-level circuit breaker:
+    If cumulative requests >= maxLivenessCalls + maxProbeCalls without PASS:
+    abort job FAIL RETRY_STORM_ABORTED; set lock TERMINAL_FAIL_LOCKED (4C)
+
+================================================================================
+4C. HARD VERIFICATION LOCK STATE MACHINE (ANTI-DRAIN)
+================================================================================
+
+Purpose: Prevent the platform from becoming an attack surface where bad keys,
+ambiguous errors, or REVIEW loops trigger repeated micro-probes that drain seller
+quota. FAIL codes alone are insufficient — locks MUST be persisted per
+keyFingerprint and enforced before any HTTP probe.
+
+States (persisted on keyFingerprint + provider):
+
+  UNLOCKED              No prior terminal outcome; probes allowed per 4D
+  PROBE_ALLOWED         Active job; L1/L2/L3 permitted within fuses
+  L2_LOCKED             L1 passed; L2 in progress; no parallel jobs
+  TERMINAL_FAIL_LOCKED  Hard failure — NO further L2/L3 until unlock event
+  TERMINAL_PASS_CACHED  Valid proof in cache; skip probes until invalidation
+  COOLDOWN_LOCKED       Abuse or storm cooldown; L1 only or refuse job
+  PARTIAL_SUCCESS_DEGRADED  L1 OK; L2 inconclusive/skipped; L3 partial — preserved evidence
+
+State transitions (mandatory):
+
+  UNLOCKED -> PROBE_ALLOWED on job start (if no COOLDOWN_LOCKED)
+  PROBE_ALLOWED -> L2_LOCKED when L1 PASS and L2 scheduled
+  L2_LOCKED -> TERMINAL_PASS_CACHED on PASS with cache write
+  L2_LOCKED -> PARTIAL_SUCCESS_DEGRADED on DEGRADED outcome (9B) with cache write
+  L2_LOCKED -> TERMINAL_PASS_CACHED on REVIEW if full L2 completed (no extra probes later)
+  Any -> TERMINAL_FAIL_LOCKED on terminal failure codes (below)
+  Any -> COOLDOWN_LOCKED on RETRY_STORM_ABORTED or abuse limits (4F)
+
+PARTIAL_SUCCESS_DEGRADED behavior:
+  - terminalOutcome = DEGRADED; preserves layer evidence (L1 ok, L2 skip/ambiguous, L3 partial)
+  - LIVE monitor: L1 only; NO automatic L2 until seller/buyer paid re-verify
+  - P2P listing: may show "Degraded verification" badge; not equivalent to PASS
+  - Unlock to UNLOCKED: seller re-verify with consent OR successful full L2 job
+
+Terminal failure codes — IMMEDIATE lock, NO L2 retry, NO "REVIEW probe loop":
+  INVALID_KEY, KEY_REVOKED, FORBIDDEN, WRONG_BASE_URL, BLACKLIST_KEY
+  MODEL_NOT_ENTITLED, QUOTA_EXHAUSTED, BILLING_INACTIVE, RATE_LIMIT_ZERO
+
+Terminal failure codes — lock L2, L1 retry allowed at most once per 24h:
+  TIMEOUT, TLS_ERROR, PROVIDER_OUTAGE (platform-wide flag may block all L1)
+
+REVIEW outcome rules:
+  - REVIEW is a marketplace/ops state, NOT permission to run more micro-probes
+  - Additional L2 requires: seller explicit [REQUEST NEW VERIFICATION], OR
+    BUYER_TRIGGERED job with fee paid (4E), OR cache invalidation event
+  - Ops manual re-check uses separate ops budget (platform key), never seller key
+
+Unlock events (only ways to leave TERMINAL_FAIL_LOCKED):
+  - Seller submits new key (new keyFingerprint)
+  - Seller updates declared quantity / model claim (invalidates cache + lock)
+  - Platform ops override with audit ticket (logged)
+  - TTL expiry ONLY for non-auth failures: TIMEOUT/OUTAGE may auto-unlock after 24h
+  - NEVER auto-unlock: INVALID_KEY, QUOTA_EXHAUSTED, MODEL_NOT_ENTITLED
+
+Orchestrator MUST read lock state before cache lookup:
+  if TERMINAL_FAIL_LOCKED and trigger is automated (LIVE, retry worker):
+    return cached failure or skip job — do NOT probe
+
+================================================================================
+4D. HARD CONSTRAINT PRIORITY ORDER (CALLS BEFORE BUDGET)
+================================================================================
+
+Policy conflict resolution — when operational envelope implies room for more probes
+but maxProbeCalls is exhausted, STOP. Never interpret envelope as authorization.
+
+  Priority   Constraint                          Type
+  --------   ----------------------------------  -----------------
+  1          Verification lock state (4C)        ABSOLUTE — blocks all
+  2          maxProbeCalls / maxLivenessCalls    ABSOLUTE — physical fuse
+  3          Single active model + 4.2B fallback ABSOLUTE (max 1 equivalent try)
+  4          Adaptive max_tokens (4.3)           ABSOLUTE
+  5          Anti-retry / abuse cooldown (4F)    ABSOLUTE
+  6          operationalMaxProbeTokens (4G)      SOFT METER — never permission
+  7          consentDisclosureCeiling            DISCLOSURE ONLY — not used in 1-6
+  8          costLiability authorization (4E)    BUSINESS RULE
+
+Implementation test (required in CI):
+  Given declaredQuantity=10_000_000, operationalMaxProbeTokens=200 (4G tier):
+    maxProbeCalls=1 -> exactly 1 micro-probe (~25 tokens) and STOP.
+    Must NOT scale probes with declared quantity.
+
+  Given declaredQuantity=500, maxProbeCalls=1, max_tokens=1:
+    Worker MUST NOT issue second probe because envelope allows it.
+
+================================================================================
+4E. VERIFICATION COST LIABILITY SPLIT
+================================================================================
+
+Verification consumes real provider quota. Who bears that cost MUST be explicit
+per job trigger — otherwise marketplace economics and seller trust collapse.
+
+Liability modes (costLiability on every job):
+
+  SELLER_PAID (default)
+    - Listing draft [LIST API · START VERIFY]
+    - Seller-initiated re-verify after cache expiry
+    - Seller consent checkbox required (Section 18)
+    - Burn charged to seller-submitted key
+
+  PLATFORM_SUBSIDIZED
+    - Tokenta Direct inventory ingest (platform pool or subsidized probe budget)
+    - Growth/promo "free verify" campaigns (explicit campaign flag)
+    - Ops investigation on flagged listings (platform ops key or capped subsidy)
+    - Seller key NOT probed beyond L1 unless seller opts in
+
+  BUYER_TRIGGERED
+    - Pre-purchase [REQUEST NEW VERIFICATION] on P2P orders
+    - Buyer pays platform fee (e.g. 0.1% spec) OR listing includes verify allowance
+    - Job MUST use fresh cache key scoped to orderId + buyerId
+    - If fee unpaid: downgrade to cached proof only (no new L2 on seller key)
+    - Seller notification: "Buyer-requested capacity check (fee paid by buyer)"
+
+Economic isolation rules:
+  - LIVE scheduler on P2P seller keys: SELLER_PAID semantics but L1-only default;
+    L2 micro-probe counts against seller unless PLATFORM_SUBSIDIZED flag set
+  - Repeated BUYER_TRIGGERED checks within 5 min: serve cache; do not re-burn seller
+  - liabilityMode MUST appear in probeManifest and F2 job footer
+
+Future marketplace rule (document now, implement in engine spec):
+  - Listing may declare maxBuyerReVerifiesPerDay
+  - Excess buyer re-verify requests -> REVIEW without new seller-key L2
+
+================================================================================
+4F. RE-VERIFY ABUSE RESISTANCE
+================================================================================
+[IMPLEMENTED 2026-05-20: server/src/verification/abuse-guard.ts — enforced on
+ POST /api/v1/listings and POST /api/v1/verification/jobs; recordJobStarted in orchestrator]
+
+Attack surface: submit low-quality keys, force cache misses, trigger 429/ambiguous
+errors, or spam REVIEW to cause repeated micro-probes on seller quota.
+
+Mandatory controls:
+
+  Rate limits per keyFingerprint (rolling 24h):
+    maxFullVerificationJobs:     5  (L1+L2 path)
+    maxMicroProbesAcrossJobs:    8  (hard aggregate across jobs)
+    maxCacheBustByUser:          3  (manual re-verify without material change)
+
+  Automated systems MUST NOT bust cache:
+    - Worker retries use same cacheKey; no new L2 on orchestrator retry
+    - SSE reconnect does not start new job
+    - LIVE monitor respects TERMINAL_PASS_CACHED and TERMINAL_FAIL_LOCKED
+
+  Ambiguous errors (e.g. AMBIGUOUS_CREDIT_ERROR):
+    - Single micro-probe only; result REVIEW
+    - NO automatic second probe to "disambiguate" — ops uses platform tools
+
+  REVIEW queue:
+    - Platform risk heuristics (L5) run without additional seller-key L2
+    - Human ops may request seller-initiated re-verify (SELLER_PAID) with consent
+
+  On abuse threshold exceeded:
+    - FAIL VERIFICATION_ABUSE_COOLDOWN
+    - COOLDOWN_LOCKED for 1h (L1-only or refuse)
+
+================================================================================
+4G. NONLINEAR ADAPTIVE PROBE ENVELOPE (OPERATIONAL BURN CAP)
+================================================================================
+
+v0.4 replaces linear "3% of declared" as the operational budget driver.
+
+Problem with linear 3% (v0.3):
+  - No causal link between declared listing size and safe probe size
+  - Small keys: over-protected (acceptable)
+  - Large keys: under-protected in absolute terms but over-authorized in probe count
+    if implementers treat 3% as permission
+  - Product liability: users read "3%" as expected burn, not worst-case legal bound
+
+Solution: operationalMaxProbeTokens = min(tierAbsoluteCeiling, logScaledCap)
+
+  function computeProbeEnvelope(declaredQuantity tokens):
+    tierAbsoluteCeiling =
+      declared < 500:        12
+      declared < 1_000:      20
+      declared < 10_000:     40
+      declared < 100_000:    75
+      declared < 1_000_000:  120
+      else:                  200
+
+    logScaledCap = clamp(round(10 + 15 * log10(declaredQuantity)), 15, 200)
+
+    return min(tierAbsoluteCeiling, logScaledCap)
+
+  consentDisclosureCeiling = min(ceil(declaredQuantity * 0.03), 5000)
+    // Used ONLY in legal checkbox: "authorized amount will not exceed X tokens"
+    // where X = consentDisclosureCeiling. Typical actual burn is envelope table 4A.2.
+    // NEVER compare probe authorization against consentDisclosureCeiling in worker code.
+
+Typical operational envelope vs declared (illustrative):
+
+  declared      operationalMax   typical actual   consentDisclosure (legal only)
+  ----------    --------------   --------------   ---------------------------
+  500           12               ~3-6             15
+  10,000        40               ~25              300
+  100,000       75               ~25-50           3,000
+  10,000,000    200              ~25-75           5,000 (capped)
+
+Engineering invariant:
+  lim(declared -> infinity) operationalMaxProbeTokens = 200 (bounded)
+  lim(declared -> 0) operationalMaxProbeTokens -> 12 with maxProbeCalls=1
+
+================================================================================
+4A. VERIFICATION COST MODEL AND SAFETY BOUNDARIES
+================================================================================
+
+This section is the implementation-facing "burn simulation sheet." Workers and
+QA MUST validate behavior against these rows before production enablement.
+
+------------------------------------------------------------------------------
+4A.1 Consumption by Layer
+------------------------------------------------------------------------------
+
+  Layer   Mechanism              Token burn      Request/RPM     Notes
+  -----   ---------------------  --------------  --------------  ------------------
+  L1      Paradigm A             ~0              1 (+0-1 retry)  Auth only
+  L2      Paradigm C (primary)   ~15-30/call     1 per call      ONLY real $ burn
+  L2 alt  Paradigm D             varies/low      1               Prefer Gemini
+  L3      Paradigm E             0-30 optional   0-1             Headers-first
+  L4      F rotation / G proxy   context budget  varies          Not listing 3%
+  L5      Platform heuristics    0               0               No provider calls
+
+------------------------------------------------------------------------------
+4A.2 Reference Burn Scenarios (Token Unit = declared tokens)
+------------------------------------------------------------------------------
+
+  Scenario                          declared    Typical burn   % of declared
+  --------------------------------  ----------  -------------  ---------------
+  Correct std (1 micro-probe)       100,000     ~25            0.025%
+  Correct std (1 probe + L3 extra)  100,000     ~50            0.05%
+  Envelope max (mis-implemented)    100,000     75             0.075% (4G cap)
+  consentDisclosure only (legal)    100,000     (not used)     3,000 tokens text
+  Small seller adaptive             800         ~3-6           0.4-0.75%
+  Cached re-run within TTL            any         0              0%
+  WRONG: multi-model x3             100,000     500-1,500      0.5-1.5%
+  WRONG: retry storm                100,000     10,000+        10%+ (SEV-1)
+
+------------------------------------------------------------------------------
+4A.3 Safety Boundaries — When NOT to Verify
+------------------------------------------------------------------------------
+
+  Worker MUST refuse or downgrade (REVIEW / user message) when:
+
+  - declaredQuantity < 100 AND seller did not accept allowPartialVerify
+  - estimatedMinProbe > operationalMaxProbeTokens (4G)
+  - keyFingerprint on blocklist or shared-key heuristics fire
+  - provider outage flag set globally
+  - prior job for same key failed RETRY_STORM_ABORTED within 1h (cooldown)
+
+  Downgrade path: L1-only + LOW confidence + manual ops REVIEW queue.
+
+------------------------------------------------------------------------------
+4A.4 What Verification Proves (Execution Capacity Inference, Not Balance Audit)
+------------------------------------------------------------------------------
+
+  Tokenta produces verifiable execution-capacity inference, NOT:
+    - Exact remaining token balance
+    - Financial account statement
+    - Guaranteed deliverable quantity at settlement time
+
+  What each layer contributes to inference:
+
+  L1  Authenticity evidence (credential valid now)
+  L2  Positive/negative execution sample (can/cannot run inference on pinned model)
+  L3  Entitlement/rate signals (stable vs hard-zero limits)
+  L4  Delivery path evidence (rotation/proxy)
+  L5  Platform asset risk score (non-provider)
+
+  estimatedExecutableQuantityRange is the PRIMARY quantity output — a band, not a
+  point. verifiedQuantity (point) is DEPRECATED. Buyback mismatch compares declared
+  to inferred RANGE overlap, not point equality.
+
+  Sellers with tiny actual remaining capacity may PASS L1 and FAIL L2 — correct
+  behavior if burn stayed within adaptive limits and lock fired on QUOTA_EXHAUSTED.
+
+================================================================================
+4B. VERIFICATION RESULT CACHE (REUSE WITHIN TTL)
+================================================================================
+
+Purpose: Reduce provider API consumption by 80-95% for repeated clicks, tab
+refreshes, and orchestrator retries within a short window.
+
+Cache record fields (minimum):
+  cacheKey, proofHash, estimatedExecutableQuantityRange, declaredAlignment,
+  capabilityScore, trustScore, complianceScore, terminalOutcome, confidence,
+  verificationMethod, probeManifestSummary, createdAt, expiresAt, provider, keyFingerprint
+
+Cache key computation:
+  cacheKey = sha256(
+    provider + "|" + keyFingerprint + "|" + accessMethod + "|" +
+    quantityBucket(declaredQuantity) + "|" + probeModelId
+  )
+  quantityBucket: floor to nearest policy bucket (e.g. <1k, 1k-10k, 10k-1M, 1M+)
+
+TTL policy:
+  LISTING_DRAFT / user re-click:     5 minutes
+  Stable listing same fingerprint:  30 minutes
+  PRE_PURCHASE buyer check:         5 minutes (never reuse seller's uncached key across buyers)
+  POST_FAIL hard auth error:        no cache write
+  LIVE monitor:                     L1 cache 5 min; L2 proof cache 6 hours
+
+Invalidation (immediate):
+  - Seller updates declared quantity or model claim
+  - Key rotation submitted
+  - Manual [REQUEST NEW VERIFICATION]
+  - QUOTA_EXHAUSTED or KEY_REVOKED on any probe
+
+Cache hit behavior:
+  - Emit Terminal steps CONNECTIVITY + QUOTA as CACHED (skipped) with timestamps
+  - proof includes verificationCache: { hit: true, ageSeconds, priorJobId }
+  - failureCode null; status PASS or prior REVIEW preserved
+  - UI badge: "Verified from cache (Xm ago)" — transparency required
+
+Implementation note: cache stores proof artifacts, NEVER raw apiKey.
+
+================================================================================
+5. PROVIDER PLAYBOOKS (CONCRETE OPERATIONS)
+================================================================================
+
+Each playbook is what the Provider Adapter executes inside RUN VERIFICATION.
+
+------------------------------------------------------------------------------
+5.1 OpenAI (including sk-proj-* project keys)
+------------------------------------------------------------------------------
+
+Base URL:  https://api.openai.com/v1
+Auth:      Authorization: Bearer {api_key}
+
+L1 — CONNECTIVITY (Paradigm A)
+  Request:
+    GET /v1/models
+    Headers: Authorization
+  PASS if:   HTTP 200, body contains data[] with at least one model id
+  FAIL if:   401 (invalid_api_key), 403 (no access), 429 (rate limited — one retry max per 4.5)
+  Extract:   model allow-list ids, created timestamps, owned_by hints
+  Latency:   record round-trip ms
+
+L2 — CAPACITY INFERENCE (Paradigms C + D)
+  OpenAI does NOT expose remaining token balance on standard project keys.
+
+  Strategy 2a — MICRO-PROBE (primary):
+    POST /v1/chat/completions
+    Body:
+      {
+        "model": "<single_pinned_probe_model_id>",
+        "messages": [{"role":"user","content":"TOKENTA_VERIFY_v1 reply OK"}],
+        "max_tokens": 5,
+        "temperature": 0
+      }
+    PASS if: 200 and choices[0].message.content present
+    Read: usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
+    Infer:  positive execution sample only — set estimatedExecutableQuantityRange via 6.2
+            declaredAlignment via 6.3; NEVER set point verifiedQuantity = declared
+    If 429/402 insufficient_quota: range band INSUFFICIENT; FAIL QUOTA_EXHAUSTED
+
+  Strategy 2b — ORGANIZATION USAGE API (admin key only — NOT seller P2P):
+    GET /organization/usage/completions
+    Use: Tokenta internal ops only
+
+L3 — RATE_LIMIT (Paradigm E + headers)
+  Primary: parse headers from L2 micro-probe response (no extra call required):
+    x-ratelimit-limit-requests, x-ratelimit-remaining-requests
+    x-ratelimit-limit-tokens, x-ratelimit-remaining-tokens
+  Optional 2nd call: ONLY if Section 4.1 budget remains, same probeModelId,
+    max_tokens 1-2, remaining-requests > 2, and probeCallCount < maxProbeCalls
+
+------------------------------------------------------------------------------
+5.2 Anthropic Claude API
+------------------------------------------------------------------------------
+
+Base URL:  https://api.anthropic.com
+Auth:      x-api-key, anthropic-version: 2023-06-01, content-type: application/json
+
+L1 — CONNECTIVITY (combined with micro-probe — no public models list on all keys)
+  POST /v1/messages
+    {
+      "model": "claude-3-5-haiku-20241022",
+      "max_tokens": 1,
+      "messages": [{"role":"user","content":"TOKENTA_VERIFY_v1"}]
+    }
+  PASS: 200, usage present
+  FAIL: 401 authentication_error
+
+L2 — CAPACITY INFERENCE
+  No public balance endpoint on standard API keys.
+  On "credit balance is too low": FAIL QUOTA_EXHAUSTED (may be ambiguous — see AMBIGUOUS_CREDIT_ERROR)
+  On success: estimatedExecutableQuantityRange per Section 6.2; confidence MEDIUM
+
+L3 — RATE_LIMIT
+  Headers: anthropic-ratelimit-* when present; retry-after on 429
+
+------------------------------------------------------------------------------
+5.3 Google Gemini (Generative Language API)
+------------------------------------------------------------------------------
+
+Base URL:  https://generativelanguage.googleapis.com/v1beta
+Auth:      x-goog-api-key
+
+L1 — CONNECTIVITY
+  GET /v1beta/models
+  FAIL: 429 with limit:0 often means billing not linked on GCP project
+
+L2 — CAPACITY INFERENCE
+  Preferred: POST /v1beta/models/{model}:countTokens
+  Alternate: POST /v1beta/models/{model}:generateContent with maxOutputTokens: 5
+  Read usageMetadata for token counts
+
+------------------------------------------------------------------------------
+5.4 OpenAI-Compatible (Custom Base URL)
+------------------------------------------------------------------------------
+
+  GET {baseUrl}/v1/models
+  POST {baseUrl}/v1/chat/completions (same micro-probe body)
+  Detect relay/reseller via headers and model list mismatch -> GRAY_MARKET_SUSPECTED
+  confidence: LOW unless host in known registry
+
+------------------------------------------------------------------------------
+5.5 Custom REST Endpoint
+------------------------------------------------------------------------------
+
+  Seller-declared health path + optional JSONPath for quota field
+  confidence: LOW; manual REVIEW queue
+
+================================================================================
+6. EXECUTION CAPACITY INFERENCE (NO BALANCE API)
+================================================================================
+
+  Provider          Standard seller key: remaining balance API?
+  ----------------  -------------------------------------------------
+  OpenAI            No (project keys); admin Usage API not seller P2P
+  Anthropic         No public balance endpoint
+  Google Gemini     No; billing signals via 429/headers only
+
+Inference method: bounded sampling produces a capacity distribution estimate,
+not a point balance. See Section 9A for scoring.
+
+Inference tiers (map to executionCapacityBand + capabilityScore):
+
+  Tier 1 — NEGATIVE PROOF
+    insufficient_quota / credit error => band INSUFFICIENT, capabilityScore <0.2, FAIL
+    Lock TERMINAL_FAIL_LOCKED; no L2 retry (4C)
+
+  Tier 2 — POSITIVE EXECUTION SAMPLE (can execute — NOT "has declared balance")
+    micro-probe OK => capabilityScore ~0.55-0.75, range via 6.2, confidence MEDIUM
+
+  Tier 3 — POSITIVE WITH RATE BOUNDS
+    probe OK + rate headers show ample headroom => capabilityScore 0.75-0.9, narrow range
+
+  Tier 4 — REPEAT SAMPLE (same model, second call only if maxProbeCalls allows)
+    two consistent OK samples => capabilityScore up to 0.92
+
+  Tier 0 — LIVENESS ONLY (adaptive skip L2)
+    band UNKNOWN, capabilityScore 0.35-0.45, terminalOutcome often DEGRADED (9B)
+
+------------------------------------------------------------------------------
+6.2 estimatedExecutableQuantityRange (Band Output — Mandatory)
+------------------------------------------------------------------------------
+
+Standard bands (unit = tokens unless listing uses calls/credits):
+
+  band id          min        max         UI label
+  ---------------  ---------  ----------  -----------------
+  MICRO_0_1K       0          1,000       Under 1K executable (proven/minimal)
+  SMALL_1K_10K     1,000      10,000      1K - 10K
+  MEDIUM_10K_100K  10,000     100,000     10K - 100K
+  LARGE_100K_1M    100,000    1,000,000   100K - 1M
+  XL_1M_PLUS       1,000,000  null        1M+ (lower bound only)
+  UNKNOWN          null       null        Insufficient evidence
+
+Mapping rules after positive L2 (probe OK):
+
+  Default (single sample, no reliable remaining-tokens header):
+    range = { min: 1_000, max: 10_000, band: SMALL_1K_10K }
+    meaning: "proved execution; cannot bound upper bound to declared"
+
+  If rate headers show remaining-tokens >> declared bucket:
+    narrow range upward to include declared bucket; declaredAlignment = CONSISTENT
+
+  If rate headers show remaining-tokens << declared:
+    range max capped by header-derived estimate; declaredAlignment = OVERCLAIMED
+
+  If probe OK but declared < range min:
+    declaredAlignment = UNDERCLAIMED (seller listed below proven floor)
+
+  FORBIDDEN: range.min = range.max = declaredQuantity (false precision)
+
+------------------------------------------------------------------------------
+6.3 declaredAlignment (Listing vs Inference)
+------------------------------------------------------------------------------
+
+  CONSISTENT     Declared quantity bucket overlaps inferred range with MEDIUM+ confidence
+  UNDERCLAIMED   Seller declared less than proven minimum band
+  OVERCLAIMED    Inferred upper bound materially below declared (buyback trigger)
+  UNVERIFIABLE   L1 only or DEGRADED; no reliable L2
+
+Buyback / strict listing mismatch:
+  declared=50k, range max < 12k with HIGH confidence in OVERCLAIMED => QUANTITY_MISMATCH
+  Partial overlap => REVIEW or DEGRADED, not automatic FAIL
+[IMPLEMENTED 2026-05-20: buyback-gate.ts — HIGH->FAIL+QUANTITY_MISMATCH, MEDIUM->REVIEW]
+
+================================================================================
+7. RATE LIMIT DISCOVERY MECHANISM
+================================================================================
+
+  1. Collect headers from all probes
+  2. Parse x-ratelimit-* or anthropic-ratelimit-*
+  3. If 429 with limit:0 => FAIL RATE_LIMIT_ZERO (Gemini billing pattern)
+  4. Optional: at most ONE extra sequential micro-probe (Section 4.1); never parallel
+  5. If remaining-tokens header = 0 before L2: skip micro-probe, FAIL or REVIEW
+
+================================================================================
+8. ACCESS-METHOD-SPECIFIC MECHANISMS
+================================================================================
+
+  DIRECT_KEY:           L1+L2+L3 at listing; proofHash without exposing key
+  KEY_ROTATION_REQUIRED: L1+L2+L3 at listing; Paradigm F at delivery (old key must 401)
+  PROXY_GATEWAY:        Paradigm G heartbeat; seller key verified at inventory ingest only
+
+================================================================================
+9. DECISION LOGIC: PASS, FAIL, REVIEW, DEGRADED
+================================================================================
+
+v0.4 uses hard gates + three independent scores (9A). REMOVED: single riskScore
+hard gate that conflated high capability with high fraud risk.
+
+REVIEW never authorizes extra seller-key L2 probes in the same session (4C, 4F).
+
+Phase 1 — Hard gates (binary):
+  Lock check: TERMINAL_FAIL_LOCKED or COOLDOWN_LOCKED -> refuse or cache-only
+  L1 FAIL -> FAIL + TERMINAL_FAIL_LOCKED
+  L2 QUOTA_EXHAUSTED / band INSUFFICIENT -> FAIL + lock
+  L2 MODEL_NOT_ENTITLED (after 4.2B exhausted) -> FAIL + lock
+  L3 RATE_LIMIT_ZERO -> FAIL + lock
+  declaredAlignment OVERCLAIMED on buyback strict -> QUANTITY_MISMATCH or FAIL
+  [IMPLEMENTED 2026-05-20: orchestrator applyBuybackStrictGate + failureCode]
+
+Phase 2 — Terminal outcome (9B) from scores + partial evidence:
+  See 9B matrix. High trustScore does NOT alone block high capability keys.
+
+PASS means: "Execution sample supports listing band at stated confidence" — NOT
+"remaining balance equals declared."
+
+================================================================================
+9A. API ASSET SCORING — THREE DIMENSIONS
+================================================================================
+
+Dimensions are orthogonal. Do NOT merge into one riskScore for gating.
+
+------------------------------------------------------------------------------
+9A.1 capabilityScore (execution capacity — "can it run?")
+------------------------------------------------------------------------------
+
+  Inputs: L1 auth, L2 micro-probe/countTokens, L3 rate headroom, repeat consistency
+  Range: 0.0 - 1.0
+
+  signal                          weight
+  ------------------------------  -------
+  L1 auth success                 0.15
+  L2 execution success            0.35
+  L2 countTokens (Gemini)         0.30
+  L3 rate headroom normalized     0.15
+  repeat sample consistency       0.10
+
+  Maps to executionCapacityBand:
+    <0.25 INSUFFICIENT | 0.25-0.50 UNKNOWN | 0.50-0.80 SUFFICIENT | >0.80 ABUNDANT
+
+  Drives: estimatedExecutableQuantityRange width, declaredAlignment, PASS vs DEGRADED
+
+------------------------------------------------------------------------------
+9A.2 trustScore (counterparty fraud — "is this asset honest?")
+------------------------------------------------------------------------------
+
+  Inputs: shared-key detection, gray-market/reseller headers, velocity, fingerprint
+  history, probeManifest tampering, prior RETRY_STORM_ABORTED
+
+  High trustScore (e.g. >0.8):
+    - Marketplace: flag PASS_WITH_TRUST_FLAG or REVIEW listing — NOT auto-FAIL
+    - Does NOT reduce capabilityScore
+    - Does NOT trigger extra seller-key L2 probes
+
+  Example: high capability + high trust risk = valid technical asset, suspicious
+  listing -> REVIEW for ops, buyer sees trust badge
+
+------------------------------------------------------------------------------
+9A.3 complianceScore (policy / region / ToS — "is this allowed?")
+------------------------------------------------------------------------------
+
+  Inputs: region restriction signals, provider ToS heuristics, custom endpoint policy,
+  blacklisted hosts, model entitlement policy violations
+
+  High complianceScore (e.g. >0.8):
+    - REVIEW or block listing per marketplace policy
+    - Separate from capability; a revoked-policy key may still "execute" briefly
+
+------------------------------------------------------------------------------
+9A.4 Decision composition (no single-score override)
+------------------------------------------------------------------------------
+
+  marketplaceAction derived from vector (capability, trust, compliance):
+
+  capability >= 0.5 AND trust < 0.8 AND compliance < 0.8  -> PASS eligible
+  capability >= 0.5 AND (trust >= 0.8 OR compliance >= 0.8) -> REVIEW (no extra L2)
+  capability 0.25-0.5 AND L1 ok                         -> DEGRADED
+  capability < 0.25 AND negative proof                   -> FAIL
+
+  Listing may show:
+    PASS + trustFlag "Shared key suspected"
+    PASS + complianceFlag "Custom endpoint — buyer beware"
+
+Distribution storage:
+  assetInferenceRecord: {
+    estimatedExecutableQuantityRange,
+    declaredAlignment,
+    capabilityScore, trustScore, complianceScore,
+    executionCapacityBand, confidence, sampleCount, tokensBurned
+  }
+
+================================================================================
+9B. TERMINAL OUTCOMES: PASS, FAIL, REVIEW, DEGRADED
+================================================================================
+
+terminalOutcome preserves partial evidence that binary PASS/FAIL would destroy.
+
+  Outcome    When                                              Lock state
+  ---------  ------------------------------------------------  -------------------------
+  PASS       Phase 1 clear; capability>=0.5; alignment OK       TERMINAL_PASS_CACHED
+  FAIL       Phase 1 hard gate failed                           TERMINAL_FAIL_LOCKED
+  REVIEW     Trust/compliance elevated; ops/buyer decision      TERMINAL_PASS_CACHED*
+  DEGRADED   L1 ok; L2 skipped/ambiguous; L3 partial            PARTIAL_SUCCESS_DEGRADED
+
+  *REVIEW may cache proof with REVIEW status; no further probes until explicit re-run
+
+DEGRADED examples:
+  - L1 PASS, L2 skipped (adaptive), L3 headers partial
+  - L2 OK but capability 0.4-0.5 (weak sample)
+  - AMBIGUOUS_CREDIT_ERROR with L1+L2 incomplete
+
+DEGRADED marketplace behavior:
+  - Not sold as "fully verified" on P2P without seller re-run
+  - May list with degraded badge and narrower buyer protection
+  - LIVE: L1 only until upgrade to PASS
+
+UI mapping:
+  PASS -> green | FAIL -> red | REVIEW -> amber | DEGRADED -> amber striped
+
+================================================================================
+10. EVIDENCE AND ATTESTATION PER STEP
+================================================================================
+
+  Each probe: paradigm, endpoint, probeModelId, requestHash, responseHash, httpStatus,
+  latencyMs, tokensUsed, requestsUsed, maxTokensUsed, result, timestamp, cached (bool)
+
+  Job summary: totalTokensUsed, totalRequestsUsed, operationalEnvelopeLimit,
+  singleModelId, fallbackUsed (4.2B), adaptiveProfile, verificationCache metadata,
+  costLiability, verificationLockState, capabilityScore, trustScore, complianceScore,
+  estimatedExecutableQuantityRange, declaredAlignment, terminalOutcome
+
+  stepHash = sha256(jobId + stepName + probeRecords[])
+  proofHash = sha256(canonical proof payload) — suitable for on-chain anchor, not raw key
+  [IMPLEMENTED 2026-05-19 — partial] Anchor status API + in-memory registry; mock chain tx only.
+
+  Terminal log lines map 1:1 to ProbeRecords (F2 verification log in product spec).
+
+================================================================================
+11. FAILURE CODE CATALOG (MECHANISM-LEVEL)
+================================================================================
+
+  INVALID_KEY, KEY_REVOKED, FORBIDDEN, WRONG_BASE_URL, TIMEOUT, TLS_ERROR
+  QUOTA_EXHAUSTED, BILLING_INACTIVE, MODEL_NOT_ENTITLED, QUANTITY_MISMATCH
+  PROBE_BUDGET_EXCEEDED, RATE_LIMIT_ZERO, RATE_LIMITED, RETRY_STORM_ABORTED
+  LOW_QUOTA_SKIP_MICRO_PROBE, ROTATION_INCOMPLETE, PROXY_HEARTBEAT_FAIL
+  GRAY_MARKET_SUSPECTED, SHARED_KEY_DETECTED, BLACKLIST_KEY, PROVIDER_OUTAGE
+  AMBIGUOUS_CREDIT_ERROR (Anthropic)
+  VERIFICATION_REFUSED_UNSAFE (declared too small / burn risk)
+  VERIFICATION_ABUSE_COOLDOWN (4F rate limit)
+  VERIFICATION_LOCKED (job refused — TERMINAL_FAIL_LOCKED or COOLDOWN_LOCKED)
+
+Lock-paired codes (MUST set TERMINAL_FAIL_LOCKED on FAIL):
+  INVALID_KEY, KEY_REVOKED, MODEL_NOT_ENTITLED, QUOTA_EXHAUSTED, RATE_LIMIT_ZERO,
+  BLACKLIST_KEY, BILLING_INACTIVE
+
+================================================================================
+12. CONTINUOUS VERIFICATION (LIVE) MECHANISM
+================================================================================
+
+  Scheduler: 5 min (Tokenta Direct), 30-60 min (P2P)
+  Each run: Paradigm A only by default (L1 cache 5 min)
+  Full micro-probe (Paradigm C): at most once per 6h per keyFingerprint unless
+    cache invalidated or seller triggers [REQUEST NEW VERIFICATION]
+[IMPLEMENTED 2026-05-20: verification/l2-cadence.ts — manual user contexts exempt]
+  LIVE runs MUST respect Section 4.1 fuses, 4C locks, 4E liability (default L1)
+  Never run full L1-L5 on schedule for SELLER_PAID keys without explicit policy
+  States: LIVE | STALE | REVOKED
+  STALE: cache expired; do not auto-L2 — surface badge only until seller/buyer trigger
+  UI: "12s ago" or LIVE badge — not a full RUN VERIFICATION button press
+[IMPLEMENTED 2026-05-20: live-monitor/state.ts tickMonitorStates; TTL 5m Direct / 30m P2P;
+ scheduler.ts; market verificationState LIVE|STALE|REVOKED; L1-only on LIVE context]
+[IMPLEMENTED 2026-05-19 — partial] live-monitor/probes.ts: P2P listings with credentialRef
+ enqueue context=LIVE jobs (vault retrieve); worker touchL1/markRevoked; DEV_CREDENTIAL_VAULT
+
+================================================================================
+13. CUSTOM AND OPENAI-COMPATIBLE ENDPOINTS
+================================================================================
+
+[IMPLEMENTED 2026-05-19 — partial] server/src/verification/providers/openai-base.ts;
+  OPENAI_COMPATIBLE_BASE_URL env + job compatibleBaseUrl; openai_compatible/custom
+  providers route through OpenAI playbook at configurable base (LOW confidence).
+
+  Known host registry -> OpenAI playbook, MEDIUM confidence
+  Unknown host -> LOW confidence + GRAY_MARKET_SUSPECTED + ops REVIEW
+
+================================================================================
+14. LEGAL, TOS, AND PROVIDER POLICY CONSTRAINTS
+================================================================================
+
+  Seller consent authorizes CONTROLLED SAMPLING (capacity inference, not balance audit).
+  Consent scope tied to costLiability (4E): who pays must be named on checkbox.
+  UI MUST state typical burn in absolute tokens (~25-75); consentDisclosureCeiling is
+  legal authorization max only, not expected usage.
+  UI MUST NOT promise exact remaining quota.
+  No raw keys in logs; hashes only.
+  Retry policy: Section 4.5 only (no unbounded exponential retry loops).
+  Disclose: probe model, max_tokens, estimated token range, cache TTL if hit.
+  Seller dispute playbook: probeManifest + tokensUsed proves actual burn.
+
+================================================================================
+15. ADAPTER INTERFACE (WORKER IMPLEMENTATION CONTRACT)
+================================================================================
+
+  ProviderVerifier:
+    livenessProbe(ctx) -> LivenessResult
+    quotaProbe(ctx, budget) -> QuotaResult
+    rateLimitProbe(ctx, priorRecords) -> RateLimitResult
+    rotationProbe(ctx) -> RotationResult (optional)
+
+  VerifyContext:
+    apiKey (ephemeral), declaredQuantity, unit, claimedModels, accessMethod,
+    probeModelId (pinned at start), allowPartialVerify, keyFingerprint,
+    costLiability, jobTrigger (LISTING | BUYER_ORDER | LIVE | OPS)
+
+  ProbeBudget:
+    maxProbeCalls (ABSOLUTE per 4.3), maxLivenessCalls, consumedTokens,
+    operationalMaxProbeTokens (4G soft meter), consentDisclosureCeiling (display only),
+    requestsUsed
+
+  ModelPinRegistry:
+    getEquivalent(provider, modelId) -> equivalentModelId | null  // 4.2B
+
+  VerificationLockStore:
+    getLock(keyFingerprint) -> LockState
+    setLock(keyFingerprint, state, reason, expiresAt?)
+    canProbeL2(keyFingerprint, trigger) -> bool
+
+  VerificationCacheStore:
+    get(cacheKey) -> CachedProof | null
+    put(cacheKey, proof, ttlSeconds)
+    invalidate(keyFingerprint | listingId)  // also clears TERMINAL_PASS_CACHED
+
+  AssetScorer:
+    computeCapabilityScore(probeRecords, headers) -> float
+    computeTrustScore(ctx, platformSignals) -> float
+    computeComplianceScore(ctx, platformSignals) -> float
+    computeQuantityRange(capability, headers, declared) -> Range + declaredAlignment
+    composeTerminalOutcome(gates, scores, partialEvidence) -> terminalOutcome
+
+  Orchestrator flow:
+    read lock (4C) -> if blocked return cached/refuse
+    -> cache lookup (4B) -> if hit return cached proof
+    -> check liability (4E) -> apply adaptive sizing (4.3) -> pin probeModelId (4.2)
+    -> L1 -> emit CONNECTIVITY -> L2 if lock+calls allow -> emit QUOTA
+    -> L3 headers-first -> emit RATE_LIMIT -> score (9A) -> risk -> finalize
+    -> update lock + cache put -> zeroize key
+
+  BudgetEnforcer: enforces 4D priority order before EVERY HTTP send.
+
+================================================================================
+16. RESEARCH NOTES AND SOURCE SUMMARY
+================================================================================
+
+  OpenAI: GET /v1/models for liveness; chat.completions + usage for quota inference;
+  insufficient_quota error code; Organization Usage API requires admin key.
+  (developers.openai.com API reference, usage cookbook)
+
+  Anthropic: POST /v1/messages max_tokens=1 as minimal probe; no balance endpoint;
+  "credit balance is too low" ambiguous (tier vs orphaned key — GitHub #1224).
+  (docs.anthropic.com, Usage and Cost Admin API docs)
+
+  Gemini: GET v1beta/models; countTokens and generateContent usageMetadata;
+  429 limit:0 often billing-not-enabled on GCP project.
+  (ai.google.dev Gemini API docs, Google AI Developers Forum)
+
+  Industry norm: marketplaces use liveness + micro-probe because seller keys rarely
+  expose remaining balance APIs.
+
+  v0.4: nonlinear envelope, quantity ranges, three-score gating, DEGRADED state,
+  MODEL_PIN_FALLBACK one-level policy.
+
+================================================================================
+17. RECOMMENDED IMPLEMENTATION ORDER
+================================================================================
+
+  1. computeProbeEnvelope (4G) + 4D priority CI tests .......... [DONE 2026-05-20]
+  2. VerificationLockStore incl. PARTIAL_SUCCESS_DEGRADED .... [DONE 2026-05-20]
+  3. ModelPinRegistry (4.2B) + single-model orchestration ..... [DONE 2026-05-20]
+  4. AssetScorer three dimensions + Range output (6.2, 9A) ... [DONE 2026-05-20]
+  5. terminalOutcome composer (9B) ........................... [DONE 2026-05-20]
+  6. OpenAI adapter + probe manifest ......................... [DONE 2026-05-20]
+  7. VerificationCacheStore (4B) ............................. [DONE 2026-05-20]
+  8. costLiability (4E) + abuse (4F) ......................... [DONE 2026-05-20]
+  9. Anthropic / Gemini ...................................... [DONE 2026-05-20]
+  10. Buyback strict gate (6.3) .............................. [DONE 2026-05-20]
+  11. Paradigm F KEY_ROTATION ................................ [DONE 2026-05-20]
+  12. PRE_PURCHASE scoped cache + fee gate ................... [DONE 2026-05-20]
+  13. Terminal copy (18, 19) ................................. [DONE 2026-05-20]
+  14. LIVE monitor (§12) ..................................... [DONE 2026-05-20]
+  15. PLATFORM_SUBSIDIZED + P2P L1-only ...................... [DONE 2026-05-20]
+  16. L2 cadence 6h (§12) ................................... [DONE 2026-05-20]
+  17. Buyer-triggered policy (§4E) ............................ [DONE 2026-05-20]
+  18. Listing credential vault ref (monitor L1) ............... [DONE 2026-05-19]
+             credential-vault.ts + listing.credentialRef + probes.ts scheduled LIVE jobs
+
+================================================================================
+18. SELLER-FACING COST DISCLOSURE (UI COPY REQUIREMENTS)
+================================================================================
+
+[IMPLEMENTED 2026-05-19 — partial] ListApiModal v0.4 consent + tour-steps.ts F2 verify copy;
+  trading-types.ts TerminalVerificationOutcome + CAPACITY_INFERENCE / LIVENESS_ONLY.
+
+ListApiModal / RUN VERIFICATION panels MUST show:
+
+  - "Execution capacity check via controlled sampling" (not "quota verification")
+  - "Does not report exact remaining balance — shows capacity band estimate"
+  - Typical burn: "~25-75 tokens for most listings" (absolute, not % of listing)
+  - Legal authorization line: "Will not exceed {consentDisclosureCeiling} tokens
+    without your new consent" — NOT "we use 3% each time"
+  - Who pays: costLiability (seller / platform / buyer)
+  - Outcome: PASS / DEGRADED / REVIEW / FAIL explained in plain language
+  - Pinned model: "{probeModelId}" and max_tokens for this job
+  - Adaptive note when declared < 1,000: "Reduced probe size for small listings"
+  - Cache transparency on re-run: "Using prior verification from cache (Xm ago)"
+
+Post-job summary (F2 log footer):
+  - tokensUsed, requestsUsed, percentOfDeclared, probesExecuted, cacheHit boolean
+  - Link to probeManifest detail for dispute support
+
+Buyback partial tests (1/3, 2/3, 3/3):
+  - Display expected burn per step before run (from 4A.1 table)
+  - Step labels: Connectivity / Capacity sample / Rate signals (not "Quota verify")
+
+================================================================================
+19. GLOSSARY: TERMS TO USE VS AVOID
+================================================================================
+
+  USE                              AVOID (customer-facing)
+  -------------------------------  ------------------------------------------
+  Controlled sampling              Zero-cost verification
+  Execution capacity inference     Quota verification / balance check
+  Capacity band / range estimate   Exact remaining tokens / verified balance
+  capabilityScore                  Single "risk score" blocking good keys
+  declaredAlignment                "Verified equals your listing amount"
+  PASS / DEGRADED / REVIEW         Binary "verified quota"
+  Seller-paid probe (default)      "Platform tests your key for free"
+  consentDisclosureCeiling         "We consume 3% per check"
+  Typical ~25-75 token sample      "Uses a percentage of your listing"
+
+================================================================================
+APPENDIX: UI BUTTON TO MECHANISM STEP MAP
+================================================================================
+
+  [LIST API · START VERIFY]     Full L1-L5 (LISTING_DRAFT)
+  [RUN VERIFICATION TEST]       Same pipeline (spec label)
+  Buyback Test 1/3                L1 only
+  Buyback Test 2/3                L2 only
+  Buyback Test 3/3                L3 only
+  [REQUEST NEW VERIFICATION]      L1-L3 (PRE_PURCHASE)
+  Tokenta Direct BUY              Paradigm G (not seller RUN VERIFY)
+  Rotation submit                 Paradigm F
+
+================================================================================
+END OF DOCUMENT
+================================================================================
+Tokenta RUN VERIFICATION Mechanism Spec v0.4
+  Nonlinear probe envelope | Quantity ranges | 3-score gating | DEGRADED state
+  Lock FSM | MODEL_PIN_FALLBACK | Single-model | Cache | Liability split

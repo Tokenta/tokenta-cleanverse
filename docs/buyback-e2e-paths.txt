@@ -1,0 +1,26 @@
+================================================================================
+TOKENTA BUYBACK — E2E PATH NOTES (dev / mock)
+================================================================================
+Companion: tokenta-verification-implementation-plan.txt Phase 2.4
+Annotated 2026-05-20 — does not replace mechanism spec test matrix.
+
+--- PASS path ---
+1. SELL -> TOKENTA BUYBACK -> accept offer
+2. BuybackVerifyModal step 1: sk-mock-buyback-pass, qty 5000, consent checked
+3. Step 2: job completes PASS
+4. Step 3: confirm buyback -> POST /api/v1/sell/tokenta-buyback/confirm -> 201 orderId
+
+--- REVIEW path (buyback strict, MEDIUM confidence) ---
+1. qty 50000 + sk-mock key with mock buyback remaining override
+2. declaredAlignment may be OVERCLAIMED -> terminal REVIEW (not QUANTITY_MISMATCH)
+3. Confirm button disabled until PASS
+
+--- DEGRADED / FAIL path ---
+1. qty 50000 + sk-mock (mock forces low remaining) -> OVERCLAIMED + HIGH -> FAIL QUANTITY_MISMATCH
+2. Or use sk-mock-old-active on rotation flow for OLD_KEY_STILL_ACTIVE
+
+--- API ---
+POST /api/v1/verification/jobs { context: TOKENTA_BUYBACK, ... }
+POST /api/v1/sell/tokenta-buyback/confirm { verificationJobId, buybackOfferId, depositAcknowledged: true }
+
+================================================================================

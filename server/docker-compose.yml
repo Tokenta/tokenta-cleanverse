@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: tokenta-terminal-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tokenta
+      POSTGRES_PASSWORD: tokenta
+      POSTGRES_DB: tokenta_terminal
+    ports:
+      - "5432:5432"
+    volumes:
+      - tokenta_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tokenta -d tokenta_terminal"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  tokenta_pg_data:

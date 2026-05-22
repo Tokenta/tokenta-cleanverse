@@ -1,0 +1,501 @@
+================================================================================
+TOKENTA VERIFICATION — IMPLEMENTATION EXECUTION PLAN
+================================================================================
+Document type:  Living execution checklist (update in place as work completes)
+Created:        2026-05-19
+Source specs:
+  - docs/tokenta-verification-engine-spec.txt        (architecture v0.1)
+  - docs/tokenta-run-verification-mechanism-spec.txt (mechanism v0.4)
+
+Status legend (edit only the marker on each line when work finishes):
+  [ ] PENDING     — not started
+  [~] PARTIAL     — started; incomplete vs spec
+  [x] DONE        — meets spec for this checklist item; do not rewrite item text
+
+Rule: When completing an item, change [ ] or [~] to [x] DONE only. Do not delete or
+reword checklist lines. Add completion date in parentheses if helpful: [x] DONE (2026-05-20)
+
+================================================================================
+EXECUTIVE SUMMARY — WHAT IS NOT DONE YET
+================================================================================
+
+Last updated: 2026-05-21 (idempotent anchor submit, nonce-safe treasury flow, terminal order listing API)
+
+PHASE 0 VERTICAL SLICE: IMPLEMENTED (dev/mock path). Run server with VERIFICATION_MOCK=true
+or real OpenAI keys. Start: cd server && npm run dev
+
+COMPLETED IN PHASE 0–1 (see checklist [x] below):
+  - Mechanism core (4G envelope, 4D budget, 4C lock, 4B cache, 4.2B model pin, 9A/9B scoring)
+  - OpenAI adapter + orchestrator + in-process worker
+  - REST: POST/GET jobs, SSE events, feed, listings, market/listings, proofs
+  - Terminal: ListApiModal POST, VerifyView job panel, F1 VERIFY column from API, v0.4 consent
+  - Abuse guard §4F (24h caps), shared-key heuristic, optional DB persistence scaffold
+  - Unit + integration tests: 114 server tests (+ redis-bullmq + live-openai skipped without env)
+
+STILL NOT IMPLEMENTED (remaining work):
+  - Production AWS KMS unwrap (envelope + HashiCorp KV client scaffolds exist)
+  - Live OpenAI CI runs only when OPENAI_API_KEY secret is configured
+  - Deployed multi-region BullMQ consumers (scaffold: USE_REGIONAL_QUEUES + WORKER_REGIONS)
+  - Phase 5: real ZK/TEE attestors, production settlement contract (not RPC stub)
+
+IN REPO (partial foundations):
+  - .github/workflows/verification-ci.yml + docker-compose.dev.yml (Postgres/Redis)
+  - provider-limiter.ts (PROVIDER_MAX_CONCURRENT); bind-signature.ts; wallet-auth.ts
+  - jobs/bull-queue.ts — USE_BULLMQ + REDIS_URL (retries + DLQ tokenta:verification:dlq)
+  - openai-base.ts — OPENAI_COMPATIBLE_BASE_URL + per-job compatibleBaseUrl
+  - GET /jobs/:id returns events[] for SSE reconnect; VerifyView uses live feed only when API up
+  - live-monitor/probes.ts — P2P scheduled L1 via credentialRef + LIVE context jobs
+  - prisma/migrations/20260519120000_init + prisma/MIGRATE.md
+  - jobs/queue.ts + redis-queue.ts (USE_REDIS_QUEUE + REDIS_URL); memory fallback
+  - security/credential-vault.ts, security/audit-log.ts, GET /health/db, GET /admin/audit-log
+  - scripts/persistence-smoke.ts + db-integration-smoke.ts; CI job db-migrate-smoke (Postgres service)
+  - platform-risk.ts L5 heuristics; proof ?download=1; POST /admin/cache/invalidate
+  - SLO p50 + under-60s % on GET /metrics/health and F2.3 panel
+  - docs/buyback-e2e-paths.txt for REVIEW/DEGRADED manual QA
+
+Next recommended step: approve docs/tokenta-terminal-api-layer-plan.txt then Phase 5A
+Terminalization (session, /terminal/run, receipt, Base Sepolia treasury signer, Swagger).
+
+[~] PARTIAL (2026-05-22): Terminal API layer — server/src/api/terminal-routes.ts + terminal-api.test.ts (11 tests)
+             docs/tokenta-terminal-api-layer-plan.txt; frontend verification.ts uses /terminal/* by default
+  - Terminal API facade /api/v1/terminal/*, SSE-first, execution receipt, Base Sepolia
+  - Phase 5A Terminalization | 5B workers | 5C production security
+
+================================================================================
+PHASE 0 — VERTICAL SLICE (WEEKS 1–2)
+Goal: One real listing verification end-to-end. Engine spec §19 Phase 0.
+================================================================================
+
+--- 0.1 Repository & contracts ---
+
+[x] DONE (2026-05-20)  Shared TypeScript types: server/src/types/verification.ts + src/app/api/verification.ts
+             Ref: engine spec §7, mechanism spec §1 outputs
+
+[x] DONE (2026-05-19)  Align Prisma VerificationJob with v0.4 core fields:
+             schema.prisma; persistJobStart + persistJobCompletion (repository.ts)
+             terminalOutcome, capabilityScore, trustScore, complianceScore,
+             proofJson, costLiability, keyFingerprint, quotaConsumed, failureReason
+             Ref: mechanism §1, §10; engine spec §14
+
+[x] DONE (2026-05-19)  Prisma migrate deploy + live Postgres smoke (npm run db:smoke)
+             CI db-migrate-smoke job; npm run db:integration; docker-compose.dev.yml
+             estimatedRange JSON, declaredAlignment, probeManifest JSON, lockState columns TBD
+
+[x] DONE     Mechanism spec v0.4 written (docs/tokenta-run-verification-mechanism-spec.txt)
+
+[x] DONE     Engine architecture spec written (docs/tokenta-verification-engine-spec.txt)
+
+--- 0.2 Mechanism core library (server-side, provider-agnostic) ---
+
+[x] DONE (2026-05-20)  computeProbeEnvelope(declaredQuantity) — mechanism §4G
+             server/src/verification/envelope.ts
+[x] DONE (2026-05-20)  BudgetEnforcer with §4D priority order + unit tests (calls-before-budget)
+             server/src/verification/budget-enforcer.ts, envelope.test.ts
+[x] DONE (2026-05-20)  VerificationLockStore — states incl. PARTIAL_SUCCESS_DEGRADED (§4C)
+             server/src/verification/lock-store.ts
+[x] DONE (2026-05-20)  VerificationCacheStore — TTL 5m/30m, fingerprint key (§4B)
+             server/src/verification/cache-store.ts
+[x] DONE (2026-05-20)  ModelPinRegistry JSON + loader — one-level fallback (§4.2B)
+             server/data/model-pin-registry.json, model-pin-registry.ts
+[x] DONE (2026-05-20)  AssetScorer: capabilityScore, trustScore, complianceScore (§9A)
+             server/src/verification/asset-scorer.ts
+[x] DONE (2026-05-20)  computeQuantityRange + declaredAlignment — no verifiedQuantity=declared (§6.2–6.3)
+             server/src/verification/asset-scorer.ts
+[x] DONE (2026-05-20)  composeTerminalOutcome — PASS/FAIL/REVIEW/DEGRADED matrix (§9B)
+             server/src/verification/asset-scorer.ts
+[x] DONE (2026-05-20)  Abuse limits per keyFingerprint (§4F)
+             abuse-guard.ts + check on POST /listings and POST /verification/jobs
+
+--- 0.3 Provider adapter — OpenAI only ---
+
+[x] DONE (2026-05-20)  OpenAI adapter: L1 GET /v1/models (Paradigm A)
+             server/src/verification/providers/openai.ts
+[x] DONE (2026-05-20)  OpenAI adapter: L2 single-model micro-probe (Paradigm C, pinned model)
+[x] DONE (2026-05-20)  OpenAI adapter: L3 rate headers from L2 response (Paradigm E, headers-first)
+             orchestrator.ts parseRateHeadroom
+[x] DONE (2026-05-20)  ProbeRecord + probeManifest forensic log per call (§10)
+[x] DONE (2026-05-20)  Failure codes: INVALID_KEY, QUOTA_EXHAUSTED, MODEL_NOT_ENTITLED, etc. (§11)
+             partial set in openai.ts + orchestrator
+
+--- 0.4 Async engine spine ---
+
+[x] DONE (2026-05-20)  POST /v1/verification/jobs — 202 Accepted, context=LISTING_DRAFT
+             server/src/api/server.ts
+
+[x] DONE (2026-05-20)  GET /v1/verification/jobs/{id} — status, steps, proof summary
+
+[x] DONE (2026-05-20)  SSE GET /v1/verification/jobs/{id}/events — step events
+
+[~] PARTIAL (2026-05-19)  Redis (or BullMQ) queue + single verification worker process
+             bullmq + CI redis-bullmq-smoke job; npm run worker:region; npm run test:redis-bullmq locally
+
+[x] DONE (2026-05-20)  Worker orchestrator pipeline: lock -> cache -> L1 -> L2 -> L3 -> score -> finalize
+             server/src/verification/orchestrator.ts, jobs/worker.ts
+
+[~] PARTIAL (2026-05-19)  Ephemeral API key handling: decrypt in worker, zeroize after job
+             job-credential-resolver + secureZeroFields; worker-zeroize.test.ts (success + fail paths)
+             secure-zero.ts; job-credential-resolver.ts loads key from vault credentialRef
+
+--- 0.5 Terminal wiring (minimal) ---
+
+[x] DONE (2026-05-20)  ListApiModal: POST job on [LIST API · START VERIFY], pass listing fields
+             terminal-flows.tsx, src/app/api/verification.ts
+
+[x] DONE (2026-05-19)  F2 VerifyView: subscribe SSE for active jobId; replace mock verifyFeed for own jobs
+             VerificationJobPanel + EventSource; feed uses API when connected (EMPTY/OFFLINE states)
+
+[x] DONE (2026-05-20)  Consent copy v0.4: absolute token typical burn, consentDisclosureCeiling, no "3% each time"
+
+[x] DONE (2026-05-20)  Job result UI: terminalOutcome badge, capacity band, tokensUsed footer
+             VerificationJobPanel.tsx
+
+[x] DONE (2026-05-20)  ListApiModal + VerifyView wired to live API (with vite proxy / VITE_VERIFICATION_API)
+
+--- 0.6 Phase 0 exit criteria ---
+
+[x] DONE (2026-05-19)  E2E: seller submits OpenAI key -> job completes -> PASS or FAIL with probeManifest
+             verification-e2e.test.ts + npm run test:e2e (VERIFICATION_MOCK + sk-mock-*)
+
+[x] DONE (2026-05-20)  CI: BudgetEnforcer tests pass (server/npm test)
+
+[x] DONE (2026-05-20)  CI: TERMINAL_FAIL_LOCKED blocks second L2 without unlock event
+             server/src/verification/lock-store.test.ts
+
+[x] DONE (2026-05-20)  No raw API key in logs or GET responses (job store clears apiKey after run)
+
+================================================================================
+PHASE 1 — SELLER ONBOARDING & MARKETPLACE BIND (WEEKS 3–4)
+Goal: Full LISTING_DRAFT pipeline, listing bind, F2 network feed. Engine spec §19 Phase 1.
+================================================================================
+
+--- 1.1 Listing service integration ---
+
+[x] DONE (2026-05-20)  POST /v1/listings — create draft + credential ref + enqueue verification
+             server/src/api/server.ts, listings/store.ts; ListApiModal uses createListing
+
+[x] DONE (2026-05-20)  POST /v1/listings/{id}/bind-verification — attach proofHash on PASS
+             auto on worker complete + manual POST endpoint
+
+[x] DONE (2026-05-20)  Listing status: VERIFYING -> LIVE on PASS; hold on REVIEW/DEGRADED
+             listingStore.bindVerification
+
+--- 1.2 Full pipeline stages (UI labels) ---
+
+[x] DONE (2026-05-20)  Emit SSE steps: CONNECTIVITY, QUOTA (capacity sample), RATE_LIMIT, RISK_ANALYSIS, FINALIZE
+             jobs/worker.ts onStep callbacks
+
+[x] DONE (2026-05-19)  L5 platform risk: trustScore/complianceScore without extra seller L2
+             platform-risk.ts L5 probe record + velocity/custom heuristics (no provider HTTP)
+
+[x] DONE (2026-05-20)  GET /v1/verification/feed — global network events for F2 ticker
+             jobs/feed.ts; VerifyView polls when rows available
+
+--- 1.3 Proof & evidence ---
+
+[x] DONE (2026-05-20)  proofHash = sha256(canonical proof payload) — no raw key (§10)
+[x] DONE (2026-05-19)  GET /v1/verification/proofs/{proofHash} — download attestation
+             JSON + ?download=1 attachment; proofDownloadUrl() in Terminal client
+
+--- 1.4 Risk basics ---
+
+[x] DONE (2026-05-20)  keyFingerprint in credential row; shared-key heuristic -> trustScore
+             listingStore.isSharedKeySuspected + orchestrator trustSignals.sharedKey
+
+[x] DONE (2026-05-20)  Blacklist fingerprint check -> FAIL BLACKLIST_KEY + lock
+             verification/blacklist.ts (VERIFICATION_BLACKLIST_FINGERPRINTS env)
+
+--- 1.5 Phase 1 exit criteria ---
+
+[x] DONE (2026-05-20)  Seller listing auto-transitions to LIVE on PASS (if autoListAfterVerify)
+[x] DONE (2026-05-19)  F2 shows real events from POST /verification/feed (live when jobs exist; mock fallback)
+             VerifyView feedConnected — mock only when API offline
+[x] DONE (2026-05-20)  Market VERIFY column reads listing verificationState from API
+             GET /api/v1/market/listings + App.tsx poll + EnhancedMarketPanel verificationState
+
+================================================================================
+PHASE 2 — MULTI-PROVIDER & BUYBACK / ROTATION (WEEKS 5–6)
+Goal: Anthropic + Gemini adapters; buyback 3-step; rotation. Engine spec §19 Phase 2.
+================================================================================
+
+--- 2.1 Additional provider adapters ---
+
+[x] DONE (2026-05-20)  Anthropic adapter: L1/L2 messages probe, adaptive max_tokens (§5.2)
+             providers/anthropic.ts + router.ts
+[x] DONE (2026-05-20)  Gemini adapter: L1 models, L2 countTokens preferred (§5.3)
+             providers/gemini.ts (L1 GET models, L2 generateContent; mock path)
+[x] DONE (2026-05-19)  OpenAI-compatible custom base URL adapter (§5.4) — LOW confidence path
+             openai-base.ts + compatibleBaseUrl on job request; OPENAI_COMPATIBLE_BASE_URL env
+
+--- 2.2 Buyback flow ---
+
+[x] DONE (2026-05-20)  POST /v1/verification/jobs context=TOKENTA_BUYBACK
+             Ref: engine §4.2, mechanism buyback tests 1/3 2/3 3/3
+
+[x] DONE (2026-05-20)  Buyback UI: step burn disclosure per 4A.1; partial step jobs
+             BuybackVerifyModal (terminal-flows.tsx) — steps 1/3, 2/3, 3/3
+
+[x] DONE (2026-05-20)  declaredAlignment OVERCLAIMED -> QUANTITY_MISMATCH (§6.3)
+             buyback-gate.ts + orchestrator; unit tests buyback-gate.test.ts
+
+[x] DONE (2026-05-20)  POST /v1/sell/tokenta-buyback/confirm on PASS
+             server/src/buyback/store.ts, POST /api/v1/sell/tokenta-buyback/confirm
+
+--- 2.3 Key rotation ---
+
+[x] DONE (2026-05-20)  POST /v1/verification/jobs context=KEY_ROTATION (§4.4 Paradigm F)
+             rotation-runner.ts + orchestrator dispatch
+[x] DONE (2026-05-20)  Rotation: old key 401 proof + new key L1/L2; order-scoped budget
+             Paradigm F old key liveness + runStandardVerification on new key
+[x] DONE (2026-05-20)  Fraud monitor job: old key still active after delivery (engine §4.4)
+             fraud-monitor.ts schedule after KEY_ROTATION PASS; GET /orders/:id/fraud-monitor
+
+--- 2.4 Phase 2 exit criteria ---
+
+[x] DONE (2026-05-20)  Three providers pass CI adapter tests with recorded fixtures (no live key in CI)
+             providers/router.test.ts (mock liveness)
+[x] DONE (2026-05-20)  Buyback E2E with REVIEW/DEGRADED paths documented
+             docs/buyback-e2e-paths.txt
+
+================================================================================
+PHASE 3 — BUYER FLOWS & LIABILITY (WEEKS 7–8)
+Goal: PRE_PURCHASE re-verify, costLiability BUYER_TRIGGERED. Engine §19 Phase 3; mechanism §4E.
+================================================================================
+
+--- 3.1 Buyer-triggered verification ---
+
+[x] DONE (2026-05-20)  POST /v1/verification/jobs context=PRE_PURCHASE, costLiability=BUYER_TRIGGERED
+             server validation + orchestrator BUYER_TRIGGERED default
+[x] DONE (2026-05-20)  Fee gate: no L2 on seller key if fee unpaid (§4E)
+             VERIFICATION_FEE_UNPAID when payerPaysFee false
+[x] DONE (2026-05-20)  Order detail [REQUEST NEW VERIFICATION] wired in Terminal
+             PrePurchaseVerifyModal + OrderDetailView button
+[x] DONE (2026-05-20)  Cache scoped to orderId + buyerId; no cross-buyer cache reuse
+             buildScopedCacheKey in cache-store.ts
+
+--- 3.2 Order trail & disputes ---
+
+[x] DONE (2026-05-20)  Order verification history linked to proofIds
+             orders/verification-trail.ts + GET /api/v1/orders/:id/verification-trail
+[x] DONE (2026-05-20)  Dispute UI: probeManifest + tokensUsed for seller dispute playbook (§14)
+             OrderDetailView fetches GET /proofs/{hash} — burn + probe count + failureCode
+
+--- 3.3 Platform subsidized path ---
+
+[x] DONE (2026-05-20)  PLATFORM_SUBSIDIZED flag for Tokenta Direct ingest (§4E)
+             POST /listings platformSubsidized -> costLiability PLATFORM_SUBSIDIZED + l1Only
+[x] DONE (2026-05-20)  L1-only LIVE default for P2P seller keys until policy enables L2
+             P2P_L1_ONLY_DEFAULT env + orchestrator shouldRunL1Only (LISTING_DRAFT)
+
+--- 3.4 Phase 3 exit criteria ---
+
+[x] DONE (2026-05-20)  Buyer-paid re-verify does not burn seller quota without consent
+             buyer-verify-policy.ts blocks useSellerStoredKey; BUYER_TRIGGERED only
+[x] DONE (2026-05-20)  Seller notification copy for buyer-triggered checks
+             sellerNotification in API response + PrePurchaseVerifyModal notice
+
+================================================================================
+PHASE 4 — CONTINUOUS LIVE MONITOR (WEEKS 9–12)
+Goal: LIVE / STALE / REVOKED; scheduler. Engine §16, §19 Phase 4; mechanism §12.
+================================================================================
+
+--- 4.1 Scheduler ---
+
+[~] PARTIAL (2026-05-19)  Cron/worker: Tokenta Direct 5m L1; P2P 30–60m L1 (§12)
+             split intervals + scheduler-lock.ts Redis NX leader when REDIS_URL set
+[x] DONE (2026-05-20)  L2 micro-probe at most 1 per 6h per fingerprint unless invalidation
+             l2-cadence.ts + orchestrator; manual LISTING_DRAFT triggers exempt
+[x] DONE (2026-05-20)  Respect PARTIAL_SUCCESS_DEGRADED and TERMINAL_FAIL_LOCKED on automated runs
+             orchestrator lock checks apply to LIVE context jobs
+
+--- 4.2 Market LIVE badge ---
+
+[x] DONE (2026-05-20)  verificationState: LIVE | STALE | REVOKED on listings API
+             listings/store mapVerificationState + market poll
+[x] DONE (2026-05-20)  STALE badge when cache expired — no auto-L2 without user trigger (§12)
+             tickMonitorStates TTL; L1-only on scheduled path
+[x] DONE (2026-05-20)  Auto-delist or alert on REVOKED (engine §16 market impact)
+             markRevoked sets status FAILED; REVOKED hidden from listLive market rows
+
+--- 4.3 Observability ---
+
+[x] DONE (2026-05-20)  Metrics: job duration, step failures, queue depth, provider latency (§18)
+             jobStore.getHealthMetrics + GET /metrics/health
+[x] DONE (2026-05-20)  F2 Pipeline Health panel wired to GET /metrics/health
+             VerifyView F2.3 polls metrics API
+
+--- 4.4 Phase 4 exit criteria ---
+
+[x] DONE (2026-05-20)  LIVE badge reflects last L1 within SLA; STALE after TTL
+             lastL1At on PASS; scheduler tick + F1 STALE/REVOKED labels
+[x] DONE (2026-05-19)  SLO dashboards: 99% STANDARD < 60s
+             GET /metrics/prometheus + /metrics/health; grafana-verification-slo.json scrape config
+
+================================================================================
+PHASE 5 — HARDENING & FUTURE (BACKLOG)
+Goal: Production hardening + spec Phase 5. Engine §19 Phase 5.
+================================================================================
+
+[~] PARTIAL (2026-05-19)  ZK / TEE attestation panel integration (F2.2 composition — optional)
+             composition API + ZK_TEE_ATTEST_MOCK probe records (ZK/TEE paradigms); hardware TBD
+[~] PARTIAL (2026-05-19)  On-chain proof anchor (mechanism §10 proofHash)
+             proof-anchor + viem encodeFunctionData anchorProofHash(bytes32); bind-audit-api.test.ts
+[~] PARTIAL (2026-05-19)  Multi-region worker deployment (engine §17)
+             worker-topology API test; docker-compose.dev.yml optional verification-worker snippet
+[x] DONE (2026-05-19)  model-pin-fallback-registry.json versioned in repo + ops process
+             server/data/model-pin-registry.json version "1"; GET /admin/model-pin-registry
+[x] DONE (2026-05-19)  Token burn simulation sheet automated QA (mechanism §4A.2 table)
+             envelope-burn-simulation.test.ts tier table
+[x] DONE (2026-05-19)  Rate limit: provider concurrency caps + global fair queue (engine §6)
+             provider-limiter.ts + metrics provider_limiter; queue.ts priority dequeue (PRE_PURCHASE first)
+
+================================================================================
+CROSS-CUTTING TRACKS (ONGOING ACROSS PHASES)
+================================================================================
+
+--- Security (engine §15, mechanism §14) ---
+
+[~] PARTIAL (2026-05-19)  KMS/Vault integration for ApiListingCredential.ciphertextRef
+             kms-envelope-vault + hashicorp-vault.ts (VAULT_ADDR); AWS KMS API TBD
+[~] PARTIAL (2026-05-19)  JWT + wallet session auth on all /verification/* routes
+             server middleware + Terminal verificationFetch (VITE_API_DEV_TOKEN, VITE_WALLET_ADDRESS)
+[~] PARTIAL (2026-05-19)  Request signing for bind-verification and escrow mutations
+             bind + escrow signed APIs; BIND_VERIFICATION audit; Terminal bind + F3 fund escrow
+[~] PARTIAL (2026-05-19)  Audit log: lock transitions, ops overrides, cache invalidations
+             GET /admin/audit-log?type= filter; admin-audit-api.test.ts bind + escrow coverage
+
+--- Testing ---
+
+[x] DONE (2026-05-20)  Unit: probe envelope tiers (500, 10k, 10M declared)
+             envelope.test.ts extended
+[x] DONE (2026-05-19)  Unit: lock FSM transition table (§4C)
+             lock-store-fsm.test.ts (8 terminal codes + pass/degraded/cooldown)
+[x] DONE (2026-05-19)  Unit: three-score decision matrix — high capability + high trust -> REVIEW not FAIL
+             asset-scorer.test.ts
+[x] DONE (2026-05-19)  Integration: mock OpenAI HTTP fixtures
+             openai-http.integration.test.ts (vi.mock fetch 401/200/compatible base)
+[x] DONE (2026-05-19)  Integration: SSE reconnect receives missed events or snapshot
+             GET /jobs/:id events[]; SSE Last-Event-ID skip + id on stream
+
+--- Terminal product alignment ---
+
+[~] PARTIAL  BUY/SELL mode, F1–F7 nav, SideNav, responsive shell
+             verification API wired (ListApiModal, VerifyView, bind, escrow); shell UI remains mock-heavy
+[x] DONE (2026-05-19)  trading-types.ts VerificationMethod enum aligned with mechanism outputs
+             CAPACITY_INFERENCE, LIVENESS_ONLY, TerminalVerificationOutcome
+[x] DONE (2026-05-19)  Remove mock verifyFeed when GET /verification/feed is live
+             App.tsx VerifyView — mock only when feed API offline
+[x] DONE (2026-05-19)  Tour steps updated for controlled sampling language (tour-steps.ts)
+             F2 verify step — v0.4 disclosure copy
+
+--- Documentation maintenance ---
+
+[x] DONE     Implementation plan created (this document)
+[~] PARTIAL (2026-05-19)  Regenerate mechanism spec PDF after each spec version bump
+             docs/scripts/regenerate-spec-pdfs.md + regenerate-spec-pdfs.ps1 (pandoc)
+[x] DONE (2026-05-20)  Update engine spec §19 phase checklist to reference this plan file
+             engine + mechanism IMPLEMENTATION STATUS blocks reference this plan
+
+--- Dev commands (Phase 0) ---
+
+  Terminal 1:  cd server && npm run dev          (PORT 8787, set VERIFICATION_MOCK=true in .env)
+  Terminal 2:  npm run dev                       (Vite proxies /api/v1/verification)
+  Tests:       cd server && npm test
+  Mock key:    sk-mock-anything (8+ chars) when VERIFICATION_MOCK=true
+
+================================================================================
+APPENDIX A — SPEC SECTION TO IMPLEMENTATION MAP
+================================================================================
+
+Mechanism spec (v0.4) section    Implementation phase    Plan IDs
+------------------------------  ----------------------  -----------------
+§4G Nonlinear envelope          Phase 0                 0.2 computeProbeEnvelope
+§4C Lock FSM                    Phase 0                 0.2 VerificationLockStore
+§4D Priority order              Phase 0                 0.2 BudgetEnforcer CI
+§4B Cache                       Phase 0                 0.2 VerificationCacheStore
+§4.2B Model pin fallback        Phase 0                 0.2 ModelPinRegistry
+§9A Three scores                Phase 0                 0.2 AssetScorer
+§9B DEGRADED outcome            Phase 0                 0.2 composeTerminalOutcome
+§5 OpenAI playbook              Phase 0                 0.3 OpenAI adapter
+§5.2–5.3 Anthropic/Gemini       Phase 2                 2.1
+§4E Liability split             Phase 3                 3.1, 3.3
+§12 LIVE monitor                Phase 4                 4.1–4.2
+§18–19 UI copy / glossary       Phase 0, 1            0.5 consent + result UI
+
+Engine spec (v0.1) section      Implementation phase    Plan IDs
+------------------------------  ----------------------  -----------------
+§6 Async architecture           Phase 0                 0.4 queue + worker
+§7 REST API                     Phase 0–3             0.4, 1.1, 3.1
+§8 SSE                          Phase 0                 0.4 SSE
+§9 Worker pipeline              Phase 0–1             0.4 orchestrator, 1.2 stages
+§14 Data model                  Phase 0                 0.1 Prisma alignment
+§16 Continuous network          Phase 4                 4.1
+§18 Observability               Phase 4                 4.3
+§19 Phases 0–4                  All phases              This document Phases 0–4
+
+================================================================================
+APPENDIX B — COMPLETION LOG (append-only; optional dates)
+================================================================================
+
+Format: YYYY-MM-DD | Plan ID | Notes
+
+2026-05-19 | DOC | Created tokenta-verification-implementation-plan.txt
+2026-05-19 | DOC | Marked mechanism v0.4 + engine v0.1 specs DONE
+2026-05-19 | 0.1 | Marked Prisma baseline PARTIAL (pre-v0.4 fields)
+2026-05-20 | 0.2-0.5 | Phase 0 mechanism + API + Terminal vertical slice implemented
+2026-05-20 | 0.2 | Unit tests passing (envelope.test.ts)
+2026-05-20 | 0.4 | E2E smoke POST job -> PASS with mock key (local)
+2026-05-20 | 1.1 | POST /listings, bind-verification, feed, proofs endpoint, lock tests
+2026-05-20 | SPEC | Annotated engine + mechanism specs with IMPLEMENTATION STATUS blocks
+2026-05-20 | 0.2 | Abuse guard §4F + abuse-guard.test.ts
+2026-05-20 | 1.4 | Shared-key heuristic -> trustScore in orchestrator
+2026-05-20 | 1.5 | GET /market/listings + Terminal VERIFY column from verificationState
+2026-05-20 | 0.1 | Optional Prisma persistence (repository.ts, USE_DB_PERSISTENCE)
+2026-05-20 | 2.1 | Anthropic L1 provider branch in orchestrator (PARTIAL)
+2026-05-20 | 2.1-2.2 | Gemini adapter, provider router, buyback gate, buyback confirm API, BuybackVerifyModal
+2026-05-20 | 2.3 | KEY_ROTATION Paradigm F, fraud monitor, rotation UI in Chat F4
+2026-05-20 | 3.1 | PRE_PURCHASE jobs, fee gate, scoped cache, order trail API + UI
+2026-05-20 | 2.4 | provider router.test.ts (3 mock liveness fixtures)
+2026-05-20 | 3.3 | PLATFORM_SUBSIDIZED + P2P L1-only default (orchestrator)
+2026-05-20 | 3.2 | Dispute proof panel on OrderDetailView
+2026-05-20 | 4.1-4.3 | live-monitor scheduler, LIVE/STALE/REVOKED, metrics health, F2.3
+2026-05-20 | 3.4 | buyer-verify-policy, seller notification copy
+2026-05-20 | 4.1 | l2-cadence 6h gate
+2026-05-20 | 2.4 | buyback-e2e-paths.txt
+2026-05-20 | 0.4 | jobs/queue.ts + job duration SLO fields
+2026-05-19 | 0.4 | redis-queue.ts (USE_REDIS_QUEUE + REDIS_URL), ioredis consumer
+2026-05-19 | SEC | credential-vault.ts, audit-log.ts, admin/audit-log, health/db
+2026-05-19 | 0.1 | persistJobStart; db:smoke script; 26 vitest tests
+2026-05-19 | 4.1 | live-monitor/probes.ts P2P scheduled L1; init Prisma migration; 28 tests
+2026-05-19 | 0.4 | bull-queue.ts USE_BULLMQ + DLQ; openai-compatible base URL
+2026-05-19 | 0.5 | VerifyView live feed; job events snapshot; asset-scorer + lock FSM tests (44 total)
+2026-05-19 | 0.6 | verification-e2e.test.ts; dev-auth; openai-http fixtures; tour + trading-types (54 tests)
+2026-05-19 | CI | verification-ci.yml; docker-compose.dev.yml; provider-limiter; bind/wallet auth (64 tests)
+2026-05-19 | 1.2 | platform-risk L5; proof download; Grafana template; db CI + integration (67 tests)
+2026-05-19 | 4.3 | GET /metrics/prometheus; encrypted-vault; escrow-signature; server/README.md (73 tests)
+2026-05-19 | 5.2 | proof-anchor registry + GET/POST /proofs/{hash}/anchor; worker maybeAutoAnchor (77 tests)
+2026-05-19 | SEC | privy-jwt HS256 dev verify (PRIVY_JWT_VERIFY); secure-zero.ts; Terminal anchor status (79 tests)
+2026-05-19 | 5.1 | proof-composition.ts; F2.2 VerifyView live bars; metrics/health proofComposition (83 tests)
+2026-05-19 | SEC | orders/escrow fund+release API; fair-queue priority; WORKER_REGION on /health
+2026-05-19 | 4.1 | LIVE_MONITOR_DIRECT/P2P intervals; privy-jwks RS256; worker-regions; proof-anchor-l2 RPC (91 tests)
+2026-05-19 | SEC | POST /admin/locks/:fingerprint/unlock ops override + audit
+2026-05-19 | 0.4 | job-credential-resolver; kms-envelope-vault; attestation-probes ZK_TEE_ATTEST_MOCK
+2026-05-19 | CI | live-openai-smoke job + test:live-openai (OPENAI_API_KEY secret)
+2026-05-19 | DOC | docs/scripts/regenerate-spec-pdfs.md; Terminal escrow API helpers (95 tests)
+2026-05-19 | 7.x | GET /api/v1/openapi.json; settlement-contract calldata; bull-queue-stats; Terminal bind+F3 (96 tests)
+2026-05-19 | SEC | hashicorp-vault KV2; worker-heartbeat; prometheus bullmq gauges; VERIFICATION-DEV-RUNBOOK.md (98 tests)
+2026-05-19 | 4.1 | scheduler-lock Redis leader; redis-bullmq CI; bind audit; Privy wallet header sync (100 tests)
+2026-05-19 | 5.2 | viem anchorProofCalldata; bind-audit-api.test.ts; audit-log duplicate field fix (102 tests)
+2026-05-19 | UI  | App.tsx duplicate buybackOffers/useTokentaWallet imports removed (Vite build fix)
+2026-05-19 | SEC | audit-log type filter; worker-zeroize + admin-audit + proof-anchor-l2 contract tests (107 tests)
+2026-05-19 | 5A  | Terminal API layer terminal-routes.ts; Swagger /terminal/docs; frontend /terminal/* (111 tests)
+2026-05-21 | 5A  | Fixed terminal session recursion + duplicate import crash; wired buy purchase + receipt preview + anchor submit + escrow release; /api/v1/docs + receipt export
+2026-05-21 | 5A  | Added terminal run cancel endpoint + treasury signer service (viem Base Sepolia) + terminal receipt export/docs tests (113 tests)
+2026-05-21 | 5B  | Added /api/v1/terminal/orders list endpoint + treasury submit retry/backoff scaffold in wallet-service
+2026-05-21 | 5B  | Idempotent /terminal/anchor/{hash}/submit + signer nonce lock/cache + retry/backoff tuning (114 tests)
+2026-05-22 | 5B  | anchor-reconcile.ts + POST /terminal/anchor/reconcile + gas bump env; OrdersView/StatusStrip/JobPanel/InventoryView wired (11 terminal-api tests)
+
+================================================================================
+END OF IMPLEMENTATION PLAN
+================================================================================
+Tokenta Verification Implementation Plan — living document
+Update markers in place as phases complete; do not remove checklist items.

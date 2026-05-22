@@ -1,0 +1,914 @@
+================================================================================
+TOKENTA TERMINAL API LAYER — PLANNING SPECIFICATION (DESIGN ONLY)
+================================================================================
+Document type:  Product + engineering plan (no implementation in this phase)
+Created:        2026-05-19
+Status:         IMPLEMENTED (Phase 5A scaffold 2026-05-21) — see server/src/api/terminal-routes.ts
+Audience:        Terminal UI, CLI, backend, settlement, DevOps
+
+Companion specs (existing):
+  - docs/tokenta-verification-engine-spec.txt        (engine architecture v0.1)
+  - docs/tokenta-run-verification-mechanism-spec.txt (mechanism v0.4)
+  - docs/tokenta-verification-implementation-plan.txt (execution checklist)
+
+Current backend surface (implemented, to be wrapped — not replaced blindly):
+  - /api/v1/verification/*   jobs, SSE, feed, proofs, metrics
+  - /api/v1/listings/*       seller onboarding
+  - /api/v1/orders/*         escrow, verification trail
+  - GET /api/v1/openapi.json (minimal fragment today)
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+The Terminal is a stream-first product: users run verification, watch progress,
+retrieve proofs, and (Phase 5A) receive on-chain execution receipts on testnet.
+
+This document defines a **Terminal-facing API Layer** — a stable, product-shaped
+contract on top of the existing Verification Engine. It is not a second engine;
+it is the **facade** the UI, future CLI (`tokenta proof <job-id>`), and Swagger
+documentation will target.
+
+Design principles:
+  1. Terminal namespace first:  /api/v1/terminal/*
+  2. SSE first for execution streams; WebSocket deferred
+  3. Explicit terminal job lifecycle (includes anchoring as first-class state)
+  4. Execution Receipt as the canonical “run finished” artifact (product soul)
+  5. Testnet settlement on **Base Sepolia** before any mainnet
+  6. Three wallet roles: User (Privy), Treasury (backend signer), Escrow (future)
+
+Implementation order (agreed roadmap):
+  Phase 5A — Terminalization (now)     → this document
+  Phase 5B — Live worker infrastructure → regional Redis/BullMQ, Docker
+  Phase 5C — Production security       → Vault/KMS, TEE/ZK, HSM, slashing
+
+================================================================================
+2. RELATIONSHIP TO EXISTING VERIFICATION API
+================================================================================
+
+Today the Terminal calls engine routes directly (via Vite proxy):
+  POST /api/v1/verification/jobs
+  GET  /api/v1/verification/jobs/{id}
+  GET  /api/v1/verification/jobs/{id}/events   (SSE)
+  GET  /api/v1/verification/proofs/{proofHash}
+
+The Terminal API Layer will **delegate** to these internally during 5A, then
+optionally absorb them behind a versioned facade. Mapping strategy:
+
+  Terminal route                    Engine route (5A adapter)
+  ------------------------------    ------------------------------------------
+  POST /terminal/session            (new) session store + Privy binding
+  POST /terminal/run                POST /verification/jobs (+ enrich)
+  GET  /terminal/job/{id}           GET  /verification/jobs/{id}
+  GET  /terminal/job/{id}/events    GET  /verification/jobs/{id}/events
+  GET  /terminal/proof/{id}         GET  /verification/proofs/{proofHash}
+                                    or GET /terminal/job/{id}/receipt
+  GET  /terminal/receipt/{jobId}    (new) execution receipt aggregate
+
+Engine-only routes remain for marketplace, admin, metrics:
+  /api/v1/listings/*, /market/listings, /orders/*, /admin/*, /metrics/*
+
+================================================================================
+3. API VERSIONING AND BASE URL
+================================================================================
+
+  Base path:     /api/v1/terminal
+  OpenAPI:       /api/v1/terminal/openapi.json
+  Swagger UI:    /api/v1/terminal/docs          (static UI, loads openapi.json)
+  Health:        /api/v1/terminal/health        (terminal layer readiness)
+
+Future breaking changes: /api/v2/terminal (not in 5A scope).
+
+================================================================================
+4. TERMINAL SESSION API
+================================================================================
+
+Purpose: Bind Privy user identity to server-side session, rate limits, audit,
+and optional wallet address used for bind/escrow signatures.
+
+4.1 POST /api/v1/terminal/session
+
+  Description: Create or refresh a terminal session after Privy login.
+
+  Request headers:
+    Authorization: Bearer <privy-access-token>   (when PRIVY_JWT_VERIFY=true)
+    X-Wallet-Address: 0x...                      (optional; must match JWT claim)
+
+  Request body (optional):
+    {
+      "client": "web-terminal",
+      "clientVersion": "0.1.0",
+      "walletAddress": "0x..."
+    }
+
+  Response 201:
+    {
+      "sessionId": "tsess_...",
+      "walletAddress": "0x...",
+      "expiresAt": "2026-05-20T12:00:00.000Z",
+      "capabilities": ["verify", "proof", "receipt"]
+    }
+
+  Errors:
+    401  invalid or missing auth
+    403  wallet mismatch vs JWT
+
+  Notes:
+    - Replaces ad-hoc VITE_API_DEV_TOKEN + X-Wallet-Address for Terminal-only flows
+    - Dev mode: API_DEV_TOKEN may map to synthetic session (documented in runbook)
+    - Session used for: POST /terminal/run, receipt download, anchor status polling
+
+4.2 GET /api/v1/terminal/session
+
+  Description: Introspect current session (from Authorization or session cookie).
+
+  Response 200: same shape as create (without rotating sessionId unless configured).
+
+4.3 DELETE /api/v1/terminal/session
+
+  Description: Logout / invalidate server session record.
+
+  Response 204.
+
+================================================================================
+5. TERMINAL RUN API (START EXECUTION)
+================================================================================
+
+5.1 POST /api/v1/terminal/run
+
+  Description: Product entry point for “run verification” — maps to engine job
+  creation with terminal lifecycle and receipt placeholder.
+
+  Requires: valid terminal session (or dev token).
+
+  Request body:
+    {
+      "mode": "verify",                    // verify | buyback | pre_purchase | rotation | live
+      "provider": "openai",                // openai | anthropic | gemini
+      "declaredQuantity": 10000,
+      "claimedModel": "gpt-4o-mini",
+      "costLiability": "SELLER_PAID",
+      "listingId": "lst_...",              // optional
+      "orderId": "ord_...",                // optional; required for rotation / pre_purchase
+      "credential": {
+        "type": "inline",                  // inline | vault_ref
+        "apiKey": "sk-..."                 // inline only; never logged; never in receipt
+      },
+      "options": {
+        "l1Only": false,
+        "stream": true                     // hint: client will open SSE
+      }
+    }
+
+  Context mapping (mode → engine context):
+    verify         → LISTING_DRAFT
+    buyback        → TOKENTA_BUYBACK
+    pre_purchase   → PRE_PURCHASE
+    rotation       → KEY_ROTATION
+    live           → LIVE
+
+  Response 202 Accepted:
+    {
+      "jobId": "vj_...",
+      "terminalJobId": "tjob_...",         // stable terminal id (may equal jobId in 5A)
+      "status": "queued",
+      "streamUrl": "/api/v1/terminal/job/tjob_.../events",
+      "receiptUrl": "/api/v1/terminal/receipt/tjob_...",
+      "proofUrl": null,
+      "createdAt": "..."
+    }
+
+  Errors:
+    400  validation
+    401  session
+    429  abuse guard (§4F)
+    503  queue saturated
+
+5.2 POST /api/v1/terminal/run/{jobId}/cancel  (optional 5A.1)
+
+  Description: User-cancel while queued or running (engine CANCELLED).
+
+  Response 200: { "status": "cancelled" }
+
+================================================================================
+6. TERMINAL JOB LIFECYCLE
+================================================================================
+
+Terminal exposes a **product lifecycle** distinct from engine internal status.
+Engine keeps: QUEUED | RUNNING | PASSED | FAILED.
+Terminal adds human-facing phases including on-chain anchoring.
+
+6.1 Terminal status enum
+
+  queued       Job accepted; not yet picked up by worker
+  running      Worker claimed job; connectivity / quota steps
+  verifying    L1/L2 probes executing (orchestrator active)
+  anchoring    Proof ready; settlement signer submitting Base Sepolia tx
+  completed    Receipt available; terminalOutcome PASS/REVIEW/DEGRADED
+  failed       Terminal FAIL or infrastructure error
+  cancelled    User or ops cancelled
+
+6.2 State transition diagram
+
+  queued → running → verifying → anchoring → completed
+                ↓         ↓           ↓
+              failed    failed      failed
+  queued → cancelled
+
+  Rules:
+    - verifying:  set when step CONNECTIVITY or QUOTA starts (SSE step_started)
+    - anchoring:  set when proof exists and anchor tx submitted (or mock pending)
+    - completed:  receipt.finalizedAt set; includes proof_hash + optional anchor_tx
+    - failed:     engine FAILED or anchor permanently failed after retries
+
+6.3 GET /api/v1/terminal/job/{terminalJobId}
+
+  Description: Poll job status (SSE preferred; poll fallback).
+
+  Response 200:
+    {
+      "terminalJobId": "tjob_...",
+      "jobId": "vj_...",
+      "status": "verifying",
+      "progress": {
+        "step": "QUOTA",
+        "stepsCompleted": 2,
+        "stepsTotal": 5,
+        "percent": 40
+      },
+      "terminalOutcome": null,
+      "proofHash": null,
+      "anchor": {
+        "chainId": 84532,
+        "network": "base-sepolia",
+        "status": "pending",
+        "txHash": null
+      },
+      "startedAt": "...",
+      "updatedAt": "..."
+    }
+
+  When completed, includes:
+      "terminalOutcome": "PASS",
+      "proofHash": "0x...",
+      "receiptUrl": "/api/v1/terminal/receipt/tjob_..."
+
+6.4 Mapping table: terminal status ← engine
+
+  Engine status + step/event          Terminal status
+  --------------------------------    ----------------
+  QUEUED                              queued
+  RUNNING, step CONNECTIVITY/QUOTA    running
+  RUNNING, step RATE_LIMIT/RISK/...   verifying
+  PASSED, anchor PENDING              anchoring
+  PASSED, anchor CONFIRMED            completed
+  PASSED, no anchor configured        completed (anchor skipped)
+  FAILED                              failed
+  CANCELLED                           cancelled
+
+================================================================================
+7. STREAMING EXECUTION (SSE FIRST)
+================================================================================
+
+7.1 GET /api/v1/terminal/job/{terminalJobId}/events
+
+  Description: Server-Sent Events stream for terminal job execution.
+
+  Headers:
+    Accept: text/event-stream
+    Last-Event-ID: <id>              (reconnect)
+
+  Event types (terminal layer — superset of engine §22):
+    session_bound
+    job_queued
+    job_running
+    step_started
+    step_completed
+    step_failed
+    job_verifying
+    proof_ready
+    anchor_submitted
+    anchor_confirmed
+    anchor_failed
+    job_completed
+    job_failed
+    stream_end
+
+  Example SSE payload:
+    id: 42
+    event: step_started
+    data: {"terminalJobId":"tjob_...","step":"QUOTA","message":"Probing capacity","timestamp":"..."}
+
+  Implementation plan (5A):
+    - Adapter wraps existing GET /verification/jobs/{id}/events
+    - Injects terminal status transitions and anchor events from proof-anchor service
+    - Same backpressure and reconnect semantics as engine SSE
+
+7.2 WebSocket (deferred — Phase 5B+)
+
+  Path (reserved, not implemented in 5A):
+    WS /api/v1/terminal/ws?sessionId=...
+
+  Use when: multi-tab sync, bidirectional cancel, or sub-100ms step fanout required.
+
+================================================================================
+8. PROOF RETRIEVAL
+================================================================================
+
+8.1 GET /api/v1/terminal/proof/{proofHash}
+
+  Description: Download attestation JSON (mechanism §10 probeManifest + scores).
+
+  Query:
+    ?download=1     Content-Disposition attachment
+    ?format=json    default
+
+  Response 200: VerificationProof document (same schema as engine).
+
+  Auth: session required for seller-owned proofs; public read TBD (marketplace).
+
+8.2 GET /api/v1/terminal/job/{terminalJobId}/proof
+
+  Description: Resolve proof by job id (convenience — avoids client storing hash).
+
+  Response 200: { "proofHash": "0x...", "proof": { ... } }
+
+  Errors: 409 if proof not ready.
+
+8.3 CLI mapping (future, not 5A code)
+
+  Command:   tokenta proof <job-id>
+  Calls:     GET /api/v1/terminal/job/{id}/proof
+             or GET /api/v1/terminal/receipt/{id} → proof_hash → proof URL
+
+================================================================================
+9. EXECUTION RECEIPT (PRODUCT SOUL)
+================================================================================
+
+The Execution Receipt is the terminal-native summary of a finished run. It is
+what users export, what disputes reference, and what anchoring extends.
+
+9.1 GET /api/v1/terminal/receipt/{terminalJobId}
+
+  Description: Canonical receipt after status = completed (or failed with partial).
+
+  Response 200:
+    {
+      "receiptVersion": "1.0",
+      "job_id": "vj_...",
+      "terminal_job_id": "tjob_...",
+      "session_id": "tsess_...",
+      "wallet_address": "0x...",
+      "provider": "openai",
+      "model": "gpt-4o-mini",
+      "verified": true,
+      "terminal_outcome": "PASS",
+      "proof_hash": "0x...",
+      "proof_url": "/api/v1/terminal/proof/0x...",
+      "anchor": {
+        "network": "base-sepolia",
+        "chain_id": 84532,
+        "contract": "0x...",
+        "anchor_tx": "0x...",
+        "anchor_status": "confirmed",
+        "anchored_at": "..."
+      },
+      "cost": {
+        "liability": "SELLER_PAID",
+        "tokens_used": 42,
+        "estimated_usdc": "0.24",
+        "currency": "USDC"
+      },
+      "timing": {
+        "queued_at": "...",
+        "started_at": "...",
+        "completed_at": "...",
+        "duration_ms": 12400
+      },
+      "scores": {
+        "capability": 0.82,
+        "trust": 0.91,
+        "compliance": 1.0
+      },
+      "signature": null
+    }
+
+  Field notes:
+    - verified: true when terminal_outcome in (PASS, REVIEW, DEGRADED) per policy
+    - anchor_tx: null until anchoring completes; receipt may be re-fetched
+    - cost.estimated_usdc: platform estimate; not on-chain billing in 5A
+    - signature: reserved for receipt ECDSA or EIP-712 in Phase 5C
+
+9.2 POST /api/v1/terminal/receipt/{terminalJobId}/export  (optional 5A.1)
+
+  Returns application/pdf or text/markdown export for support tickets.
+
+================================================================================
+10. TESTNET SETTLEMENT — BASE SEPOLIA
+================================================================================
+
+10.1 Network choice
+
+  Primary testnet:  Base Sepolia
+  Chain ID:         84532
+  Rationale:        Low gas, EVM-compatible, aligns with L2 anchor scaffold
+                    already using chainId 421614 placeholder → migrate to 84532
+
+  Mainnet:          explicitly out of scope until 5C + security review.
+
+10.2 Settlement operations (terminal-facing)
+
+  POST /api/v1/terminal/anchor/{proofHash}/submit
+    Description: Idempotent anchor submit using treasury signer.
+    Body: { "terminalJobId": "tjob_..." }
+    Response 202: { "anchorStatus": "pending", "txHash": null }
+    Response 200: { "anchorStatus": "confirmed", "txHash": "0x..." }
+
+  GET /api/v1/terminal/anchor/{proofHash}
+    Description: Anchor status for receipt and F2 UI.
+    Response: same as engine GET /verification/proofs/{hash}/anchor, enriched
+              with network name and explorer URL template.
+
+10.3 Contract (testnet)
+
+  Function:   anchorProofHash(bytes32 proofHash)
+  ABI file:   server/data/tokenta-settlement-anchor.abi.json (existing scaffold)
+  Deploy:     TokentaVerificationAnchor on Base Sepolia (address in env)
+  Env:
+    SETTLEMENT_NETWORK=base-sepolia
+    SETTLEMENT_CHAIN_ID=84532
+    SETTLEMENT_RPC_URL=https://sepolia.base.org
+    SETTLEMENT_CONTRACT_ADDRESS=0x...
+    TREASURY_PRIVATE_KEY=...          (see §11 — never commit)
+
+10.4 Explorer links (receipt + UI)
+
+  tx template: https://sepolia.basescan.org/tx/{txHash}
+  contract:    https://sepolia.basescan.org/address/{contract}
+
+================================================================================
+11. WALLET & SIGNING ARCHITECTURE
+================================================================================
+
+Privy solves user login — not protocol settlement. Tokenta requires three wallet
+roles.
+
+11.1 Wallet type 1 — User Wallet (Privy — largely done)
+
+  Purpose:
+    - User login and identity
+    - Session binding (POST /terminal/session)
+    - Future: reputation, staking, billing
+    - Client-side: bind-verification HMAC, escrow fund/release signatures
+
+  Integration:
+    - Terminal: @privy-io/react-auth → access token → Authorization header
+    - Server: privy-jwt.ts / privy-jwks.ts (existing)
+    - Headers: X-Wallet-Address synced from useTokentaWallet (existing)
+
+  5A work: formalize session binding; stop relying only on dev token in prod path.
+
+11.2 Wallet type 2 — Treasury / Platform Wallet (5A — must build)
+
+  Purpose:
+    - anchorProofHash submission
+    - pay gas on Base Sepolia
+    - future: escrow movement, protocol ops
+
+  Must NOT use Privy embedded wallet for backend ops.
+
+  MVP architecture (Phase 5A):
+    verification-worker / anchor service
+        ↓
+    wallet-service (new module)
+        ↓
+    viem createWalletClient({ account, chain: baseSepolia, transport: http })
+        ↓
+    Base Sepolia RPC
+
+  Env (server only, secret manager in 5C):
+    TREASURY_PRIVATE_KEY=0x...
+    SETTLEMENT_RPC_URL=...
+    SETTLEMENT_CONTRACT_ADDRESS=0x...
+
+  Safety (5A minimum):
+    - Key never logged; never returned in API
+    - Rate limit anchor submits per proofHash
+    - Dry-run mode: SETTLEMENT_DRY_RUN=true (simulate tx, no broadcast)
+    - Separate process optional: anchor-worker only signs
+
+11.3 Wallet type 3 — Escrow / Order Wallet (future)
+
+  Purpose: USDC escrow fund/release on-chain (beyond current signed API mock).
+
+  5A: keep HTTP escrow API + signatures; document on-chain escrow as 5B/5C.
+
+11.4 Who signs what
+
+  Action                          Signer
+  ------------------------------  ---------------------------------
+  User login                      Privy (user wallet)
+  POST /terminal/session          Server validates Privy JWT
+  POST /terminal/run              Session + optional seller apiKey in body
+  bind-verification               User HMAC (bind-signature.ts — existing)
+  escrow fund/release             User HMAC (escrow-signature.ts — existing)
+  anchorProofHash on testnet      Treasury (viem walletClient)
+  Receipt integrity (future)      Platform ECDSA or EIP-712 over receipt hash
+
+11.5 Terminal execution ↔ wallet identity binding
+
+  Every terminal job record stores:
+    sessionId, walletAddress (from session), optional listingId/orderId
+
+  Receipt includes wallet_address for audit and dispute.
+
+  Rule: POST /terminal/run rejects wallet mismatch if session wallet != body.
+
+================================================================================
+12. OPENAPI & SWAGGER UI PLAN
+================================================================================
+
+12.1 Documents
+
+  File (planned):     server/src/api/openapi-terminal.ts
+  Published JSON:     GET /api/v1/terminal/openapi.json
+  Swagger UI static:  GET /api/v1/terminal/docs
+                      (serve swagger-ui-dist or CDN + openapi.json URL)
+
+  Tags:
+    Session
+    Run
+    Job
+    Stream
+    Proof
+    Receipt
+    Anchor
+    Health
+
+12.2 Coexistence with engine OpenAPI
+
+  GET /api/v1/openapi.json           — engine/marketplace (existing, keep)
+  GET /api/v1/terminal/openapi.json  — terminal product (new)
+  Optional index: GET /api/v1/docs    — links to both
+
+12.3 Auth in OpenAPI
+
+  securitySchemes:
+    bearerAuth:   Privy JWT
+    devToken:     X-Api-Dev-Token (development only)
+    walletHeader: X-Wallet-Address (with bearer)
+
+12.4 Example operationIds (for codegen)
+
+  createTerminalSession
+  terminalRun
+  getTerminalJob
+  streamTerminalJobEvents
+  getTerminalProof
+  getTerminalReceipt
+  submitTerminalAnchor
+
+================================================================================
+13. TERMINAL UI → API MAPPING (SUMMARY — SEE §19 FOR FULL BUTTON MATRIX)
+================================================================================
+
+  NOTE (2026-05-19 audit): Section 13 is NOT a complete 1:1 UI map. Full inventory in §19.
+  Verdict: Terminal API plan is NOT yet fully aligned with every frontend button.
+
+  UI surface (current Terminal)     Terminal API (planned)        Engine (today)
+  --------------------------------  --------------------------  ---------------------
+  Privy login                       POST /terminal/session        (new)
+  ListApiModal START VERIFY         POST /terminal/run            POST /listings (not /jobs alone)
+  VerifyView job panel              GET /terminal/job/{id}        GET /verification/jobs/{id}
+  VerifyView SSE                    GET .../job/{id}/events         GET .../jobs/{id}/events
+  F2 feed                           GET /verification/feed        (unchanged)
+  Order detail proof download       GET /terminal/proof/{hash}    GET /verification/proofs/{hash}
+  Order detail anchor badge         GET /terminal/anchor/{hash}   GET .../proofs/{hash}/anchor
+  Post-verify receipt card (new)    GET /terminal/receipt/{id}    (new)
+  Bind listing button               POST /listings/.../bind       (unchanged)
+  Fund escrow F3                    POST /orders/.../escrow/fund  (unchanged)
+
+================================================================================
+19. UI ↔ API ALIGNMENT AUDIT (2026-05-19) — BUTTON-LEVEL MATRIX
+================================================================================
+
+Legend:
+  ALIGNED     Plan or engine API exists and matches the button today
+  PARTIAL     API exists but wrong path, missing terminal facade, or UI uses different route
+  GAP-UI      Button exists; no backend call (mock / local only)
+  GAP-API     Backend exists; no UI button wired
+  PLANNED     In §4–10 but not in current UI or server terminal namespace
+
+--- F0 Global / chrome ---
+
+  UI control                         Current API call              Plan coverage        Status
+  ---------------------------------  ----------------------------  -------------------  --------
+  Privy CONNECT WALLET (TopBar)      Privy SDK only                POST /terminal/session  GAP-API (no session POST yet)
+  WalletMenu copy / disconnect       Privy SDK                     —                    N/A (client)
+  BUY / SELL mode toggle             localStorage session          —                    N/A (client)
+  SideNav F1–F7 navigation           none                          —                    N/A (client)
+  UserTour Next/Skip                 localStorage                  —                    N/A (client)
+  PreviewModeBanner login            Privy                         POST /terminal/session  PARTIAL
+  AuthPromptToast login              Privy                         POST /terminal/session  PARTIAL
+
+--- F1 MARKET ---
+
+  UI control                         Current API call              Plan coverage        Status
+  ---------------------------------  ----------------------------  -------------------  --------
+  SideNav LIST API (SELL)            opens ListApiModal            (modal chain)        ALIGNED
+  SideNav BROWSE MARKET              setNav MARKET                 —                    N/A
+  TradePanel LIST / BUY API          opens modals                  —                    ALIGNED
+  EnhancedMarketPanel BUY VERIFIED   opens BuyApiModal             —                    GAP-UI (see BY.1)
+  Market row select / filters        none (client state)           —                    N/A
+  fetchMarketListings on load        GET /market/listings          engine only §2       PARTIAL (not in /terminal/*)
+  MarketActionBanner BUY VERIFIED    opens BuyApiModal             —                    GAP-UI
+  SellMarketPanel LIST API           opens ListApiModal            —                    ALIGNED
+  SellMarketPanel tab TOKENTA_BUYBACK UI only                      —                    N/A
+  BuybackOfferCard ACCEPT BUYBACK    opens BuybackVerifyModal      buyback flow         ALIGNED
+  InventoryView create listing       opens ListApiModal            POST /terminal/listings/run  [x] DONE (2026-05-22)
+
+--- SL.1 List API modal (seller verify + list) ---
+
+  UI control                         Current API call              Plan coverage        Status
+  ---------------------------------  ----------------------------  -------------------  --------
+  LIST API · START VERIFY            POST /api/v1/listings         POST /terminal/run   PARTIAL
+                                     (listing+job atomically)      mode=verify          Plan omits /listings;
+                                                                                          should be:
+                                     POST /terminal/listings/run OR
+                                     POST /terminal/run + listingId returned
+
+--- BY.1 Buy API modal (buyer purchase) ---
+
+  UI control                         Current API call              Plan coverage        Status
+  ---------------------------------  ----------------------------  -------------------  --------
+  BUY VERIFIED API · LOCK ESCROW     none → mock orderId ORD-78214  (not documented)    GAP-UI + GAP-API
+  FULL BUYOUT / PARTIAL toggle       none                          —                    N/A
+  Needs: POST /terminal/orders/purchase or /market/listings/{id}/buy
+         + escrow fund in one flow or documented two-step
+
+--- F2 VERIFY pipeline ---
+
+  UI control                         Current API call              Plan coverage        Status
+  ---------------------------------  ----------------------------  -------------------  --------
+  Page load feed table               GET /verification/feed        engine §2            PARTIAL (not /terminal)
+  Page load metrics F2.3             GET /metrics/health           not in terminal plan GAP in plan §13
+  Proof composition bars F2.2        GET /verification/metrics/composition  not in plan   GAP in plan §13
+  VerificationJobPanel (active job)  GET /jobs/{id} + SSE          GET /terminal/job/*  ALIGNED (facade)
+  BIND VERIFICATION TO LISTING       POST bind-verification        engine §2            PARTIAL (not /terminal)
+                                     + POST /dev/bind/sign
+  (no receipt panel in UI today)     —                             GET /terminal/receipt  PLANNED
+  (no anchor submit button)          GET anchor status only        POST /terminal/anchor/submit  GAP-UI
+
+--- BB.1 Buyback modal (3-step) ---
+
+  UI control                         Current API call              Plan coverage        Status
+  ---------------------------------  ----------------------------  -------------------  --------
+  START VERIFY · TEST 1/3            POST /verification/jobs       POST /terminal/run   PARTIAL
+                                     context=TOKENTA_BUYBACK         mode=buyback
+  Step 2 job panel                   SSE + GET job                 terminal job/*       ALIGNED
+  CONFIRM BUYBACK · ON PASS          POST /sell/tokenta-buyback/confirm  not in plan   GAP in plan
+  Needs: POST /terminal/buyback/confirm or /terminal/commerce/buyback/confirm
+
+--- BP.1 Pre-purchase modal ---
+
+  UI control                         Current API call              Plan coverage        Status
+  ---------------------------------  ----------------------------  -------------------  --------
+  RUN PRE-PURCHASE VERIFY            POST /verification/jobs       POST /terminal/run   PARTIAL
+                                     context=PRE_PURCHASE          mode=pre_purchase
+
+--- F3 ESCROW ---
+
+  UI control                         Current API call              Plan coverage        Status
+  ---------------------------------  ----------------------------  -------------------  --------
+  FUND ESCROW (API)                  POST escrow/fund              engine §2            PARTIAL
+                                     + POST /dev/escrow/sign       (not /terminal)
+  RELEASE ESCROW                     client has releaseOrderEscrow  not in plan §13      GAP-UI + GAP in plan
+                                     but EscrowView has NO button
+  Needs: POST /terminal/orders/{id}/escrow/release + UI button
+
+--- F4 ORDERS ---
+
+  UI control                         Current API call              Plan coverage        Status
+  ---------------------------------  ----------------------------  -------------------  --------
+  Order list select                  GET /terminal/orders + mock   GET /terminal/orders? [x] DONE (2026-05-22)
+  COMPLETE PURCHASE                  navigates BuyApiModal         (mock)               GAP-UI
+  OPEN ORDER ROOM                    setNav CHAT                   —                    N/A
+  REQUEST NEW VERIFICATION           opens PrePurchaseVerifyModal  POST /terminal/run   ALIGNED
+  VIEW VERIFY PIPELINE               setNav VERIFY                 —                    N/A
+  Verification trail table           GET orders/.../verification-trail  engine only   PARTIAL
+  DOWNLOAD PROOF JSON                GET proofs/{hash}?download=1  GET /terminal/proof  PARTIAL
+  Dispute evidence / anchor label    GET proof + GET anchor        GET /terminal/*    PARTIAL
+  Order detail inline job panel      SSE job                       terminal job/*       ALIGNED
+
+--- F5 CHAT / rotation ---
+
+  UI control                         Current API call              Plan coverage        Status
+  ---------------------------------  ----------------------------  -------------------  --------
+  Send message                       none (mock)                   —                    GAP-UI
+  SUBMIT NEW KEY & REVOKE OLD KEY    POST /verification/jobs       POST /terminal/run   PARTIAL
+                                     context=KEY_ROTATION          mode=rotation
+  Fraud monitor (engine exists)      none in UI                    GET/POST fraud-*     GAP-UI + GAP in plan
+
+--- F6 REPUTATION ---
+
+  UI control                         Current API call              Plan coverage        Status
+  ---------------------------------  ----------------------------  -------------------  --------
+  DEPOSIT / WITHDRAW / ADJUST STAKE  requireAuth only (mock)       —                    GAP-UI
+  Settlement stream table            mock data                     —                    GAP-UI
+
+--- F7 ANALYTICS ---
+
+  UI control                         Current API call              Plan coverage        Status
+  ---------------------------------  ----------------------------  -------------------  --------
+  All panels                         mock / static                 —                    GAP-UI
+
+--- Dev helper endpoints (used by buttons) ---
+
+  POST /dev/bind/sign                bind flow                     should be /terminal/sign/bind  GAP in plan
+  POST /dev/escrow/sign              fund flow                     should be /terminal/sign/escrow GAP in plan
+
+================================================================================
+20. GAP REMEDIATION — REQUIRED PLAN ADDITIONS FOR 1:1 BUTTON COVERAGE
+================================================================================
+
+To make APIs fully correspond to frontend buttons, extend Phase 5A OpenAPI with:
+
+  A. Session & auth (already in plan)
+     POST   /terminal/session
+     GET    /terminal/session
+     DELETE /terminal/session
+
+  B. Run & commerce (fix List/Buy mismatch)
+     POST   /terminal/listings/run          SL.1 — create listing + verify (wraps POST /listings)
+     POST   /terminal/run                   generic verify (buyback, pre_purchase, rotation, live)
+     POST   /terminal/buyback/confirm        BB.1 CONFIRM BUYBACK
+     POST   /terminal/orders/purchase        BY.1 BUY VERIFIED API (create order + escrow intent)
+     GET    /terminal/orders/{orderId}       order detail (replace mock orders[])
+     GET    /terminal/orders/{orderId}/verification-trail
+
+  C. Marketplace read (F1 column)
+     GET    /terminal/market/listings        wraps GET /market/listings (VERIFY column)
+
+  D. Verify workspace read (F2)
+     GET    /terminal/feed                   wraps GET /verification/feed
+     GET    /terminal/metrics/health         wraps GET /metrics/health
+     GET    /terminal/metrics/composition    wraps GET /verification/metrics/composition
+
+  E. Proof, receipt, anchor (product soul)
+     GET    /terminal/job/{id}/proof
+     GET    /terminal/proof/{hash}
+     GET    /terminal/receipt/{id}           + UI receipt card on VerifyView + OrderDetail
+     GET    /terminal/anchor/{hash}
+     POST   /terminal/anchor/{hash}/submit   + UI "ANCHOR ON BASE SEPOLIA" when PASS
+     GET    /terminal/receipt/{id}/export    optional export button
+
+  F. Listing bind & signatures
+     POST   /terminal/listings/{id}/bind-verification
+     POST   /terminal/sign/bind               replaces /dev/bind/sign for product
+     POST   /terminal/sign/escrow             replaces /dev/escrow/sign
+
+  G. Escrow (F3 complete)
+     POST   /terminal/orders/{id}/escrow/fund
+     POST   /terminal/orders/{id}/escrow/release   + FUND RELEASE button in EscrowView
+     GET    /terminal/orders/{id}/escrow
+
+  H. Chat / fraud (F5 — if in 5A scope)
+     POST   /terminal/orders/{id}/fraud-monitor/run
+     GET    /terminal/orders/{id}/fraud-monitor
+
+  I. Deferred (mock UI today — document as Phase 5A.2 or 5B)
+     F6 reputation deposit/withdraw/stake
+     F7 analytics
+     F5 order room messages (WebSocket or REST chat)
+
+  J. Swagger
+     Every row in §19 matrix must appear as an operationId in openapi-terminal.ts
+     Tag grouping: Session | Market | Run | Job | Stream | Proof | Receipt | Anchor |
+                   Orders | Escrow | Buyback | Sign | Metrics | Feed
+
+================================================================================
+21. RECOMMENDED terminal/run MODE TABLE (aligns all verify buttons)
+================================================================================
+
+  Frontend button / modal              mode value       Engine context
+  -----------------------------------  ---------------  ------------------
+  LIST API · START VERIFY              listing          (via /terminal/listings/run)
+  START VERIFY · TEST 1/3 (buyback)    buyback          TOKENTA_BUYBACK
+  RUN PRE-PURCHASE VERIFY              pre_purchase     PRE_PURCHASE
+  SUBMIT NEW KEY & REVOKE OLD KEY      rotation         KEY_ROTATION
+  (scheduled LIVE — no button)         live             LIVE
+
+================================================================================
+14. IMPLEMENTATION PHASES (DETAILED)
+================================================================================
+
+--- Phase 5A — Terminalization (CURRENT — implement after doc approval) ---
+
+  Scope:
+    [x] terminal router module + adapter to engine jobStore
+    [x] POST/GET/DELETE /terminal/session
+    [x] POST /terminal/run with mode → context mapping
+    [x] Terminal job status mapper (queued → … → completed)
+    [x] GET /terminal/job/{id}
+    [x] GET /terminal/job/{id}/events (SSE adapter + anchor events)
+    [x] GET /terminal/proof/{hash} and /terminal/job/{id}/proof
+    [x] GET /terminal/receipt/{id} aggregator
+    [x] wallet-service + Base Sepolia treasury signer (viem) (env-based signer; Vault/KMS hardening pending)
+    [x] POST /terminal/anchor/{hash}/submit
+    [x] openapi-terminal.ts + Swagger UI at /terminal/docs
+    [x] Terminal client: migrate verification.ts to terminal paths (feature flag)
+    [x] Tests: session, run, receipt, anchor dry-run, SSE terminal events
+    [x] Update implementation-plan.txt markers when each ships
+
+  Non-goals in 5A:
+    - Mainnet
+    - WebSocket
+    - Vault/KMS for treasury key (env private key only, with warnings)
+    - Real USDC escrow on-chain
+
+--- Phase 5B — Live Worker Infrastructure ---
+
+  Scope:
+    [ ] Regional BullMQ consumers (USE_REGIONAL_QUEUES)
+    [x] docker-compose verification-worker service enabled (profile: workers — 2026-05-22)
+    [ ] Queue isolation per region + DLQ monitoring
+    [ ] Anchor worker as separate deployable
+    [x] Retry system for anchor tx (nonce, gas bump, PENDING reconcile loop) (2026-05-22)
+    [ ] WebSocket evaluation (if SSE insufficient)
+
+--- Phase 5C — Production Security ---
+
+  Scope:
+    [ ] Treasury key in Vault/KMS / HSM
+    [ ] Receipt signing
+    [ ] TEE/ZK real attestors
+    [ ] Multi-region active-active
+    [ ] Slashing / decentralized verification (research)
+
+================================================================================
+15. ENVIRONMENT VARIABLES (PLANNED)
+================================================================================
+
+  # Terminal layer
+  TERMINAL_API_ENABLED=true
+  TERMINAL_SESSION_TTL_SEC=86400
+
+  # Settlement (Base Sepolia)
+  SETTLEMENT_NETWORK=base-sepolia
+  SETTLEMENT_CHAIN_ID=84532
+  SETTLEMENT_RPC_URL=
+  SETTLEMENT_CONTRACT_ADDRESS=
+  SETTLEMENT_DRY_RUN=true
+  TREASURY_PRIVATE_KEY=
+
+  # Legacy engine anchor (migrate to SETTLEMENT_* in 5A)
+  PROOF_ANCHOR_RPC_URL=
+  PROOF_ANCHOR_CHAIN_ID=84532
+  PROOF_ANCHOR_USE_CONTRACT=true
+  PROOF_ANCHOR_CONTRACT_ADDRESS=
+
+  # User auth (existing)
+  PRIVY_JWT_VERIFY=
+  PRIVY_JWKS_URL=
+  REQUIRE_API_AUTH=
+  API_DEV_TOKEN=
+
+================================================================================
+16. SECURITY & COMPLIANCE NOTES
+================================================================================
+
+  - API keys in POST /terminal/run must never appear in receipts, logs, or SSE.
+  - Treasury key rotation procedure required before mainnet.
+  - Base Sepolia ETH faucet documented in runbook for dev gas.
+  - Receipt cost fields are estimates unless on-chain billing wired.
+  - Rate limits: reuse abuse-guard keyFingerprint + per-session caps.
+
+================================================================================
+17. ACCEPTANCE CRITERIA (5A DONE)
+================================================================================
+
+  1. User logs in via Privy → POST /terminal/session → 201.
+  2. User starts verify from ListApiModal → POST /terminal/run → 202 queued.
+  3. SSE stream shows verifying → proof_ready → anchoring → job_completed.
+  4. GET /terminal/receipt/{id} returns execution receipt with proof_hash.
+  5. On Base Sepolia testnet, anchor_tx populated when SETTLEMENT_DRY_RUN=false.
+  6. Swagger UI at /api/v1/terminal/docs documents all terminal routes.
+  7. Existing engine routes remain functional (no breaking removal).
+
+================================================================================
+18. REFERENCES
+================================================================================
+
+  Implementation checklist: docs/tokenta-verification-implementation-plan.txt
+  Engine spec §7 REST, §8 SSE, §19 phases: tokenta-verification-engine-spec.txt
+  Mechanism §10 proofHash: tokenta-run-verification-mechanism-spec.txt
+  Dev runbook: docs/VERIFICATION-DEV-RUNBOOK.md
+  Existing ABI: server/data/tokenta-settlement-anchor.abi.json
+
+================================================================================
+END OF TERMINAL API LAYER PLAN — DESIGN ONLY
+================================================================================
+§19–§21 added 2026-05-19: UI button audit — plan was NOT 1:1 complete; extend OpenAPI before 5A coding.
+
+Approve this document (including §20 gap additions) before Phase 5A engineering begins.
+Update status lines in companion specs when implementation starts (annotate only).

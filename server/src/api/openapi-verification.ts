@@ -1,0 +1,57 @@
+/** Minimal OpenAPI 3.1 fragment for verification + listings (engine §7). */
+
+export const verificationOpenApi = {
+  openapi: "3.1.0",
+  info: {
+    title: "Tokenta Verification API",
+    version: "0.1.0",
+    description: "Async verification engine — see docs/tokenta-verification-engine-spec.txt",
+  },
+  servers: [{ url: "/api/v1" }],
+  paths: {
+    "/verification/jobs": {
+      post: {
+        summary: "Create verification job",
+        operationId: "createVerificationJob",
+        responses: { "202": { description: "Job accepted" } },
+      },
+    },
+    "/verification/jobs/{jobId}": {
+      get: { summary: "Get job status and proof", operationId: "getVerificationJob" },
+    },
+    "/verification/jobs/{jobId}/events": {
+      get: { summary: "SSE job events", operationId: "streamJobEvents" },
+    },
+    "/verification/feed": {
+      get: { summary: "Global verification feed (F2.1)", operationId: "getVerificationFeed" },
+    },
+    "/verification/metrics/composition": {
+      get: { summary: "Proof composition (F2.2)", operationId: "getProofComposition" },
+    },
+    "/verification/proofs/{proofHash}": {
+      get: { summary: "Download attestation JSON", operationId: "getProof" },
+    },
+    "/verification/proofs/{proofHash}/anchor": {
+      get: { summary: "On-chain anchor status", operationId: "getProofAnchor" },
+      post: { summary: "Register / confirm anchor", operationId: "postProofAnchor" },
+    },
+    "/listings": {
+      post: { summary: "Create listing + start verify", operationId: "createListing" },
+    },
+    "/listings/{listingId}/bind-verification": {
+      post: { summary: "Bind proof to listing (signed)", operationId: "bindVerification" },
+    },
+    "/metrics/health": {
+      get: { summary: "Pipeline health (F2.3)", operationId: "getMetricsHealth" },
+    },
+    "/orders/{orderId}/escrow/fund": {
+      post: { summary: "Fund escrow (signed)", operationId: "fundEscrow" },
+    },
+    "/orders/{orderId}/escrow/release": {
+      post: { summary: "Release escrow (signed)", operationId: "releaseEscrow" },
+    },
+    "/admin/worker-topology": {
+      get: { summary: "Multi-region worker topology", operationId: "getWorkerTopology" },
+    },
+  },
+} as const;

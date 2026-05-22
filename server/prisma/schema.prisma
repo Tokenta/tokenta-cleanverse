@@ -1,0 +1,563 @@
+// Tokenta Terminal — PostgreSQL schema
+// Maps F1–F7 workspaces: market, verify pipeline, trade desk, order room,
+// reputation, wallet, analytics.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums (aligned with UI labels in tokenta-data.ts and App.tsx)
+// ---------------------------------------------------------------------------
+
+enum PreferredRole {
+  BUYER
+  SELLER
+}
+
+enum AssetType {
+  COMPUTE
+  API_QUOTA
+  MODEL_ACCESS
+}
+
+enum VerificationMethod {
+  ZK_PROOF
+  TEE_ATTEST
+  SIGNATURE
+  QUOTA_CHK
+}
+
+enum AssetStatus {
+  DRAFT
+  VERIFYING
+  LIVE
+  PAUSED
+  DELISTED
+}
+
+enum OrderSide {
+  BUY
+  SELL
+}
+
+enum OrderStatus {
+  MATCHING
+  VERIFYING
+  DELIVERING
+  SETTLED
+  DISPUTED
+  CANCELLED
+}
+
+enum EscrowStatus {
+  PENDING
+  FUNDED
+  RELEASED
+  DISPUTED
+  REFUNDED
+}
+
+enum VerifyStepType {
+  ZK_PROOF
+  TEE_ATTEST
+  SIGNATURE
+  QUOTA_CHK
+  ATTEST_Q
+  HEALTH_CHECK
+  LATENCY_SAMPLE
+}
+
+enum VerifyResult {
+  PASS
+  FAIL
+  PENDING
+}
+
+enum VerificationJobStatus {
+  QUEUED
+  RUNNING
+  PASSED
+  FAILED
+  CANCELLED
+}
+
+enum OrderBookSide {
+  BID
+  ASK
+}
+
+enum ChatSenderType {
+  SYSTEM
+  BUYER
+  SELLER
+  MODERATOR
+}
+
+enum LedgerEntryType {
+  SETTLE
+  ESCROW
+  RELEASE
+  STAKE
+  DISPUTE_HOLD
+  DEPOSIT
+  WITHDRAW
+  SLASH
+}
+
+enum ListingProviderKind {
+  OPENAI_COMPATIBLE
+  ANTHROPIC
+  GOOGLE_AI
+  CUSTOM_REST
+}
+
+enum BuyMode {
+  BUYOUT
+  PARTIAL
+}
+
+// ---------------------------------------------------------------------------
+// Identity & session (wallet connect, default seller for new wallets)
+// ---------------------------------------------------------------------------
+
+model Wallet {
+  id              String        @id @default(cuid())
+  address         String        @unique @db.VarChar(66)
+  chainId         Int           @default(421614) @map("chain_id") // TOKENTA-L2 placeholder
+  displayName     String?       @map("display_name")
+  preferredRole   PreferredRole @default(SELLER) @map("preferred_role")
+  firstConnectedAt DateTime     @default(now()) @map("first_connected_at")
+  lastSeenAt      DateTime      @default(now()) @map("last_seen_at")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+
+  balance              WalletBalance?
+  terminalPreferences  TerminalPreference?
+  listings             ApiListing[]       @relation("SellerListings")
+  buyOrders            Order[]            @relation("BuyerOrders")
+  sellOrders           Order[]            @relation("SellerOrders")
+  ledgerEntries        WalletLedgerEntry[]
+  chatMessages         ChatMessage[]
+  reputationProfile    ReputationProfile?
+
+  @@index([lastSeenAt])
+  @@map("wallets")
+}
+
+model TerminalPreference {
+  id              String   @id @default(cuid())
+  walletId        String   @unique @map("wallet_id")
+  tourCompleted   Boolean  @default(false) @map("tour_completed")
+  tourVersion     String?  @map("tour_version") // e.g. tokenta-terminal-tour-v1
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@map("terminal_preferences")
+}
+
+// ---------------------------------------------------------------------------
+// F6 Wallet — balances, bonds, ledger
+// ---------------------------------------------------------------------------
+
+model WalletBalance {
+  id               String   @id @default(cuid())
+  walletId         String   @unique @map("wallet_id")
+  availableUsdc    Decimal  @default(0) @map("available_usdc") @db.Decimal(24, 8)
+  escrowedUsdc     Decimal  @default(0) @map("escrowed_usdc") @db.Decimal(24, 8)
+  stakedUsdc       Decimal  @default(0) @map("staked_usdc") @db.Decimal(24, 8)
+  reputationBondUsdc Decimal @default(0) @map("reputation_bond_usdc") @db.Decimal(24, 8)
+  sellerCollateralUsdc Decimal @default(0) @map("seller_collateral_usdc") @db.Decimal(24, 8)
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@map("wallet_balances")
+}
+
+model WalletLedgerEntry {
+  id          String          @id @default(cuid())
+  walletId    String          @map("wallet_id")
+  orderId     String?         @map("order_id")
+  entryType   LedgerEntryType @map("entry_type")
+  amountUsdc  Decimal         @map("amount_usdc") @db.Decimal(24, 8) // signed: negative = outflow
+  currency    String          @default("USDC") @db.VarChar(16)
+  txHash      String?         @map("tx_hash") @db.VarChar(128)
+  note        String?
+  occurredAt  DateTime        @default(now()) @map("occurred_at")
+
+  wallet Wallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  order  Order? @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  @@index([walletId, occurredAt(sort: Desc)])
+  @@index([orderId])
+  @@map("wallet_ledger_entries")
+}
+
+// ---------------------------------------------------------------------------
+// F1 Market — providers, assets, order book, price history
+// ---------------------------------------------------------------------------
+
+model ApiProvider {
+  id        String   @id @default(cuid())
+  slug      String   @unique @db.VarChar(64) // NEXUS-LABS, OPENAI-RES
+  name      String   @db.VarChar(128)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  assets      Asset[]
+  listings    ApiListing[]
+  slaPolicies SlaPolicy[]
+
+  @@map("api_providers")
+}
+
+model Asset {
+  id                 String             @id @default(cuid())
+  publicId           String             @unique @map("public_id") @db.VarChar(16) // AST-001
+  ticker             String             @unique @db.VarChar(32)
+  assetType          AssetType          @map("asset_type")
+  providerId         String             @map("provider_id")
+  listingId          String?            @unique @map("listing_id")
+  supplyAmount       Decimal            @map("supply_amount") @db.Decimal(24, 4)
+  supplyUnit         String             @map("supply_unit") @db.VarChar(32)
+  priceUsdc          Decimal            @map("price_usdc") @db.Decimal(24, 8)
+  change24hPct       Decimal?           @map("change_24h_pct") @db.Decimal(8, 4)
+  volume24hUsdc      Decimal?           @map("volume_24h_usdc") @db.Decimal(24, 2)
+  verificationMethod VerificationMethod @map("verification_method")
+  uptimePct          Decimal            @map("uptime_pct") @db.Decimal(6, 3)
+  status             AssetStatus        @default(LIVE)
+  createdAt          DateTime           @default(now()) @map("created_at")
+  updatedAt          DateTime           @updatedAt @map("updated_at")
+
+  provider       ApiProvider        @relation(fields: [providerId], references: [id])
+  listing        ApiListing?        @relation(fields: [listingId], references: [id])
+  orderBookLevels OrderBookLevel[]
+  priceTicks     AssetPriceTick[]
+  orders         Order[]
+  verifyEvents   VerificationEvent[]
+
+  @@index([status, ticker])
+  @@map("assets")
+}
+
+model AssetPriceTick {
+  id        String   @id @default(cuid())
+  assetId   String   @map("asset_id")
+  priceUsdc Decimal  @map("price_usdc") @db.Decimal(24, 8)
+  recordedAt DateTime @default(now()) @map("recorded_at")
+
+  asset Asset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@index([assetId, recordedAt(sort: Desc)])
+  @@map("asset_price_ticks")
+}
+
+model OrderBookLevel {
+  id        String        @id @default(cuid())
+  assetId   String        @map("asset_id")
+  side      OrderBookSide
+  priceUsdc Decimal       @map("price_usdc") @db.Decimal(24, 8)
+  sizeAmount Decimal      @map("size_amount") @db.Decimal(24, 4)
+  totalUsdc Decimal      @map("total_usdc") @db.Decimal(24, 4)
+  levelRank Int           @map("level_rank") // 1 = best bid/ask
+  updatedAt DateTime      @updatedAt @map("updated_at")
+
+  asset Asset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@unique([assetId, side, levelRank])
+  @@map("order_book_levels")
+}
+
+// ---------------------------------------------------------------------------
+// Seller listing flow (List API modal — SL.1)
+// ---------------------------------------------------------------------------
+
+model ApiListing {
+  id                    String              @id @default(cuid())
+  publicId              String?             @unique @map("public_id") @db.VarChar(24)
+  sellerWalletId        String              @map("seller_wallet_id")
+  providerId            String?             @map("provider_id")
+  providerKind          ListingProviderKind @map("provider_kind")
+  quotaToSell           Decimal             @map("quota_to_sell") @db.Decimal(24, 4)
+  quotaUnit             String              @default("tokens") @map("quota_unit") @db.VarChar(32)
+  askPriceUsdc          Decimal             @map("ask_price_usdc") @db.Decimal(24, 8)
+  verifyConsentAt       DateTime?           @map("verify_consent_at")
+  verifyQuotaPct        Decimal             @default(3) @map("verify_quota_pct") @db.Decimal(5, 2)
+  autoListAfterVerify   Boolean             @default(true) @map("auto_list_after_verify")
+  status                AssetStatus         @default(VERIFYING)
+  createdAt             DateTime            @default(now()) @map("created_at")
+  updatedAt             DateTime            @updatedAt @map("updated_at")
+
+  sellerWallet      Wallet              @relation("SellerListings", fields: [sellerWalletId], references: [id])
+  provider          ApiProvider?        @relation(fields: [providerId], references: [id])
+  credential        ApiListingCredential?
+  verificationJobs  VerificationJob[]
+  asset             Asset?
+
+  @@index([sellerWalletId, status])
+  @@map("api_listings")
+}
+
+/// API keys are never stored in plaintext — only KMS/Vault references.
+model ApiListingCredential {
+  id              String   @id @default(cuid())
+  listingId       String   @unique @map("listing_id")
+  ciphertextRef   String   @map("ciphertext_ref") @db.VarChar(512)
+  kmsKeyId        String?  @map("kms_key_id") @db.VarChar(128)
+  keyFingerprint  String?  @map("key_fingerprint") @db.VarChar(64)
+  rotatedAt       DateTime? @map("rotated_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  listing ApiListing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@map("api_listing_credentials")
+}
+
+// ---------------------------------------------------------------------------
+// F2 Verify Pipeline — jobs (listing probes) + global feed events
+// ---------------------------------------------------------------------------
+
+model VerificationJob {
+  id              String                @id @default(cuid())
+  listingId       String?               @map("listing_id")
+  status          VerificationJobStatus @default(QUEUED)
+  stepsTotal      Int                   @default(5) @map("steps_total")
+  stepsCompleted  Int                   @default(0) @map("steps_completed")
+  quotaConsumed   Decimal?              @map("quota_consumed") @db.Decimal(24, 4)
+  keyFingerprint  String?               @map("key_fingerprint") @db.VarChar(64)
+  terminalOutcome String?               @map("terminal_outcome") @db.VarChar(16)
+  capabilityScore Float?                @map("capability_score")
+  trustScore      Float?                @map("trust_score")
+  complianceScore Float?                @map("compliance_score")
+  proofHash       String?               @map("proof_hash") @db.VarChar(128)
+  proofJson       Json?                 @map("proof_json")
+  costLiability   String?               @map("cost_liability") @db.VarChar(32)
+  startedAt       DateTime?             @map("started_at")
+  completedAt     DateTime?             @map("completed_at")
+  failureReason   String?               @map("failure_reason")
+  createdAt       DateTime              @default(now()) @map("created_at")
+
+  listing ApiListing? @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  events  VerificationEvent[]
+
+  @@index([listingId, status])
+  @@index([keyFingerprint])
+  @@map("verification_jobs")
+}
+
+model VerificationEvent {
+  id           String         @id @default(cuid())
+  jobId        String?        @map("job_id")
+  orderId      String?        @map("order_id")
+  assetId      String?        @map("asset_id")
+  stepType     VerifyStepType @map("step_type")
+  result       VerifyResult   @default(PENDING)
+  proofHash    String?        @map("proof_hash") @db.VarChar(128)
+  latencyMs    Int?           @map("latency_ms")
+  occurredAt   DateTime       @default(now()) @map("occurred_at")
+
+  job   VerificationJob? @relation(fields: [jobId], references: [id], onDelete: SetNull)
+  order Order?           @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  asset Asset?           @relation(fields: [assetId], references: [id], onDelete: SetNull)
+
+  @@index([occurredAt(sort: Desc)])
+  @@index([assetId])
+  @@map("verification_events")
+}
+
+// ---------------------------------------------------------------------------
+// F3 Trade Desk — orders, escrow, lifecycle timeline
+// ---------------------------------------------------------------------------
+
+model Order {
+  id              String       @id @default(cuid())
+  publicId        String       @unique @map("public_id") @db.VarChar(16) // ORD-78214
+  assetId         String       @map("asset_id")
+  buyerWalletId   String?      @map("buyer_wallet_id")
+  sellerWalletId  String?      @map("seller_wallet_id")
+  side            OrderSide
+  buyMode         BuyMode?     @map("buy_mode")
+  quantity        Decimal      @db.Decimal(24, 4)
+  quantityUnit    String       @map("quantity_unit") @db.VarChar(32)
+  limitPriceUsdc  Decimal      @map("limit_price_usdc") @db.Decimal(24, 8)
+  totalValueUsdc  Decimal      @map("total_value_usdc") @db.Decimal(24, 8)
+  escrowStatus    EscrowStatus @default(PENDING) @map("escrow_status")
+  status          OrderStatus  @default(MATCHING)
+  verifyStepsDone Int          @default(0) @map("verify_steps_done")
+  verifyStepsTotal Int         @default(3) @map("verify_steps_total")
+  deliveryDeadline DateTime?   @map("delivery_deadline")
+  createdAt       DateTime     @default(now()) @map("created_at")
+  updatedAt       DateTime     @updatedAt @map("updated_at")
+  settledAt       DateTime?    @map("settled_at")
+
+  asset            Asset                 @relation(fields: [assetId], references: [id])
+  buyerWallet      Wallet?               @relation("BuyerOrders", fields: [buyerWalletId], references: [id])
+  sellerWallet     Wallet?               @relation("SellerOrders", fields: [sellerWalletId], references: [id])
+  lifecycleEvents  OrderLifecycleEvent[]
+  escrowEvents     EscrowEvent[]
+  verifyEvents     VerificationEvent[]
+  ledgerEntries    WalletLedgerEntry[]
+  chatRoom         ChatRoom?
+  dispute          OrderDispute?
+
+  @@index([buyerWalletId, status])
+  @@index([sellerWalletId, status])
+  @@index([status, createdAt(sort: Desc)])
+  @@map("orders")
+}
+
+model OrderLifecycleEvent {
+  id          String   @id @default(cuid())
+  orderId     String   @map("order_id")
+  label       String   @db.VarChar(128) // VERIFY STEP 1/3
+  detail      String?
+  statusLabel String?  @map("status_label") @db.VarChar(32) // DONE, ACTIVE
+  occurredAt  DateTime @default(now()) @map("occurred_at")
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId, occurredAt])
+  @@map("order_lifecycle_events")
+}
+
+model EscrowEvent {
+  id         String       @id @default(cuid())
+  orderId    String       @map("order_id")
+  status     EscrowStatus
+  amountUsdc Decimal      @map("amount_usdc") @db.Decimal(24, 8)
+  txHash     String?      @map("tx_hash") @db.VarChar(128)
+  note       String?
+  occurredAt DateTime     @default(now()) @map("occurred_at")
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId, occurredAt])
+  @@map("escrow_events")
+}
+
+model OrderDispute {
+  id          String   @id @default(cuid())
+  orderId     String   @unique @map("order_id")
+  reason      String?
+  openedAt    DateTime @default(now()) @map("opened_at")
+  resolvedAt  DateTime? @map("resolved_at")
+  resolution  String?  @db.VarChar(64) // FAVOR_BUYER, FAVOR_SELLER, SPLIT
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@map("order_disputes")
+}
+
+// ---------------------------------------------------------------------------
+// F4 Order Room — per-order encrypted chat (not F2 verify stream)
+// ---------------------------------------------------------------------------
+
+model ChatRoom {
+  id        String   @id @default(cuid())
+  orderId   String   @unique @map("order_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  order    Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  messages ChatMessage[]
+
+  @@map("chat_rooms")
+}
+
+model ChatMessage {
+  id           String         @id @default(cuid())
+  roomId       String         @map("room_id")
+  senderType   ChatSenderType @map("sender_type")
+  senderWalletId String?      @map("sender_wallet_id")
+  bodyPlain    String?        @map("body_plain") // dev only; production uses bodyCiphertextRef
+  bodyCiphertextRef String?   @map("body_ciphertext_ref") @db.VarChar(512)
+  attachmentRef String?       @map("attachment_ref") @db.VarChar(512)
+  sentAt       DateTime       @default(now()) @map("sent_at")
+
+  room         ChatRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  senderWallet Wallet?  @relation(fields: [senderWalletId], references: [id], onDelete: SetNull)
+
+  @@index([roomId, sentAt])
+  @@map("chat_messages")
+}
+
+// ---------------------------------------------------------------------------
+// F5 Reputation — append-only ledger per actor
+// ---------------------------------------------------------------------------
+
+model ReputationProfile {
+  id           String   @id @default(cuid())
+  walletId     String?  @unique @map("wallet_id")
+  actorSlug    String   @unique @map("actor_slug") @db.VarChar(64)
+  displayName  String   @map("display_name") @db.VarChar(128)
+  score        Decimal  @default(0) @db.Decimal(6, 2)
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  wallet Wallet?            @relation(fields: [walletId], references: [id], onDelete: SetNull)
+  events ReputationEvent[]
+
+  @@map("reputation_profiles")
+}
+
+model ReputationEvent {
+  id         String   @id @default(cuid())
+  profileId  String   @map("profile_id")
+  eventCode  String   @map("event_code") @db.VarChar(64) // DELIVERY-ON-TIME
+  delta      Decimal  @db.Decimal(6, 2)
+  scoreAfter Decimal  @map("score_after") @db.Decimal(6, 2)
+  metadata   Json?
+  occurredAt DateTime @default(now()) @map("occurred_at")
+
+  profile ReputationProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  @@index([profileId, occurredAt(sort: Desc)])
+  @@map("reputation_events")
+}
+
+// ---------------------------------------------------------------------------
+// F7 Analytics & SLA — platform metrics and provider SLA breaches
+// ---------------------------------------------------------------------------
+
+model PlatformMetricSnapshot {
+  id         String   @id @default(cuid())
+  metricKey  String   @map("metric_key") @db.VarChar(64) // VERIFY_THROUGHPUT
+  value      String   @db.VarChar(64)
+  deltaLabel String?  @map("delta_label") @db.VarChar(32)
+  capturedAt DateTime @default(now()) @map("captured_at")
+
+  @@index([metricKey, capturedAt(sort: Desc)])
+  @@map("platform_metric_snapshots")
+}
+
+model SlaPolicy {
+  id                  String   @id @default(cuid())
+  providerId          String?  @map("provider_id")
+  assetId             String?  @map("asset_id")
+  uptimeCommitmentPct Decimal  @map("uptime_commitment_pct") @db.Decimal(6, 3)
+  windowDays          Int      @default(30) @map("window_days")
+  createdAt           DateTime @default(now()) @map("created_at")
+
+  provider ApiProvider? @relation(fields: [providerId], references: [id], onDelete: SetNull)
+  breaches SlaBreach[]
+
+  @@map("sla_policies")
+}
+
+model SlaBreach {
+  id          String   @id @default(cuid())
+  policyId    String   @map("policy_id")
+  actualPct   Decimal  @map("actual_pct") @db.Decimal(6, 3)
+  creditOwedUsdc Decimal @map("credit_owed_usdc") @db.Decimal(24, 8)
+  breachedAt  DateTime @default(now()) @map("breached_at")
+
+  policy SlaPolicy @relation(fields: [policyId], references: [id], onDelete: Cascade)
+
+  @@index([policyId, breachedAt(sort: Desc)])
+  @@map("sla_breaches")
+}

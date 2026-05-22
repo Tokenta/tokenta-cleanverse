@@ -1,0 +1,128 @@
+name: Verification CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  server-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate Prisma client
+        run: npm run db:generate
+      - name: Unit and integration tests
+        env:
+          VERIFICATION_MOCK: "true"
+        run: npm test
+      - name: E2E verification slice
+        env:
+          VERIFICATION_MOCK: "true"
+        run: npm run test:e2e
+
+  db-migrate-smoke:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: tokenta
+          POSTGRES_PASSWORD: tokenta
+          POSTGRES_DB: tokenta_terminal
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tokenta -d tokenta_terminal"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://tokenta:tokenta@localhost:5432/tokenta_terminal
+      USE_DB_PERSISTENCE: "true"
+      VERIFICATION_MOCK: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate Prisma client
+        run: npm run db:generate
+      - name: Migrate deploy
+        run: npm run db:migrate:deploy
+      - name: Persistence smoke
+        run: npm run db:smoke
+      - name: DB integration (job persist)
+        run: npm run db:integration
+
+  live-openai-smoke:
+    runs-on: ubuntu-latest
+    if: ${{ secrets.OPENAI_API_KEY != '' }}
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Live OpenAI verification smoke (optional secret)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          RUN_LIVE_OPENAI_SMOKE: "true"
+          VERIFICATION_MOCK: "false"
+        run: npm run test:live-openai
+
+  redis-bullmq-smoke:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      REDIS_URL: redis://localhost:6379
+      USE_BULLMQ: "true"
+      VERIFICATION_MOCK: "true"
+      RUN_REDIS_BULLMQ_SMOKE: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: BullMQ enqueue smoke
+        run: npm test -- src/api/redis-bullmq-smoke.test.ts

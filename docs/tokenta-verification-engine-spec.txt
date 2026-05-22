@@ -1,0 +1,1099 @@
+================================================================================
+TOKENTA VERIFICATION ENGINE
+Architecture & API Execution Specification (v0.1)
+================================================================================
+Document type:  Research / Engineering execution plan (no implementation)
+Date:           2026-05-19
+Scope:          Maps current Tokenta Terminal UI (F2, SELL flows, orders) to
+                async backend Verification Engine, REST APIs, workers, and
+                real-time event streams.
+Status:         DESIGN ONLY — APIs and backend described for future build.
+                (Original status preserved; implementation progress annotated below.)
+
+================================================================================
+IMPLEMENTATION STATUS (annotated 2026-05-21 session 14 — original spec text unchanged below)
+================================================================================
+Tracking: docs/tokenta-verification-implementation-plan.txt
+
+Phase 0 — Foundation ............................ [DONE] server + Terminal vertical slice
+  POST/GET /api/v1/verification/jobs ............ [DONE] server/src/api/server.ts
+  SSE /jobs/{id}/events ......................... [DONE]
+  OpenAI adapter (L1/L2/L3 headers) ............. [DONE] mock + live key paths
+  In-process worker + queue backends .......... [PARTIAL] memory / redis / bullmq (queue.ts)
+  ListApiModal -> live job ...................... [DONE]
+  KMS/Vault credential storage .................. [PARTIAL] kms-envelope-vault.ts + credential-vault.ts
+
+Phase 1 — Seller onboarding ................... [DONE — in-memory dev path]
+  POST /listings + bind proof ................... [DONE] server/src/listings, POST /api/v1/listings
+  GET /verification/feed for F2 ................. [DONE] jobs/feed.ts + VerifyView poll
+  GET /market/listings verificationState ........ [DONE] listings/store + Terminal F1 VERIFY column
+  Prisma v0.4 job columns ....................... [PARTIAL] schema + optional repository.ts sync
+  proofHash in job result ......................... [DONE] mechanism orchestrator
+  GET /verification/proofs/{id} ................. [DONE] GET /api/v1/verification/proofs/{proofHash}
+  Blacklist fingerprint ........................... [DONE] verification/blacklist.ts
+  Abuse §4F (24h caps) ............................ [DONE] abuse-guard.ts on listing/job create
+  Shared-key heuristic ............................ [DONE] listingStore + trustScore bump
+
+Phase 2 — Multi-provider & buyback .............. [MOSTLY DONE — dev path]
+  Anthropic L1+L2 ................................. [DONE] providers/anthropic.ts + router.ts
+  Gemini L1+L2 .................................... [DONE] providers/gemini.ts
+  TOKENTA_BUYBACK jobs + confirm API .............. [DONE] buyback-gate, buyback/store, BuybackVerifyModal
+  KEY_ROTATION Paradigm F ......................... [DONE] rotation-runner.ts
+  Fraud monitor post-rotation ..................... [DONE] fraud-monitor.ts
+  PRE_PURCHASE buyer-triggered .................... [DONE] fee gate + scoped cache
+  Order verification trail ........................ [DONE] GET /orders/:id/verification-trail
+
+Phase 3 — Buyer flows ........................... [DONE — dev path]
+  PRE_PURCHASE + fee + scoped cache ............. [DONE]
+  PLATFORM_SUBSIDIZED / L1-only P2P policy ...... [DONE]
+  Dispute proof on order detail ................. [DONE]
+
+Phase 4 — Continuous LIVE ....................... [MOSTLY DONE — in-process scheduler]
+  LIVE / STALE / REVOKED market states .......... [DONE]
+  GET /metrics/health + F2.3 panel .............. [DONE]
+  GET /metrics/prometheus (Grafana scrape) ...... [DONE 2026-05-19]
+  L2 cadence 6h per fingerprint ............... [DONE]
+  Job queue abstraction (memory + Redis + BullMQ) [PARTIAL] USE_BULLMQ / USE_REDIS_QUEUE
+  Distributed cron + P2P scheduled L1 keys ...... [PARTIAL] live-monitor/probes.ts enqueues LIVE jobs
+
+Phase 5 ......................................... [PARTIAL]
+  Terminal API layer (product facade) ............. [PARTIAL 2026-05-21] /api/v1/terminal/* + Swagger /terminal/docs + run cancel + receipt export + idempotent anchor submit
+  On-chain proof anchor (dev registry) .......... [PARTIAL 2026-05-19] proof-anchor + viem calldata + PROOF_ANCHOR_RPC_URL
+  ZK/TEE F2.2 panel ............................. [PARTIAL 2026-05-19] composition + ZK_TEE_ATTEST_MOCK probes
+  Multi-region workers .......................... [PARTIAL 2026-05-19] worker-regions.ts + regional BullMQ names
+
+Companion:      tokenta-run-verification-mechanism-spec.txt (v0.4)
+                Stochastic capacity inference: nonlinear probe envelope (4G),
+                quantity ranges, capability/trust/compliance scores, lock FSM.
+                Workers MUST enforce mechanism caps before any provider HTTP call.
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+  1.  Executive Summary
+  2.  Strategic Position: Verification as Moat
+  3.  Current Frontend Surface (Terminal UI Audit)
+  4.  End-to-End User Pipelines (UI → API)
+  5.  System Architecture Overview
+  6.  Async Verification Architecture
+  7.  REST API Specification
+  8.  Real-Time Event Stream (SSE / WebSocket)
+  9.  Verification Worker Pipeline (Execution Layers)
+  10. Provider Adapter Layer
+  11. Access Method Verification Matrix
+  12. Risk Analysis Engine
+  13. Verification Proof & Hash (On-Chain Anchor)
+  14. Data Model & Persistence
+  15. Security: API Key Lifecycle
+  16. Continuous Verification Network (Phase 2+)
+  17. Service Topology & Deployment
+  18. Observability & SLOs
+  19. Implementation Phases & Milestones
+  20. Appendix A: UI Trigger → API Matrix
+  21. Appendix B: Verification Job State Machine
+  22. Appendix C: Event Type Catalog
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+Tokenta's core product is not an API key marketplace UI. The traded commodity is:
+
+    "Trusted API Asset State"
+
+The value chain:
+
+    Raw API Key  →  Verification Pipeline  →  Verified API Asset  →  Tradable Asset
+
+The Verification Engine is Tokenta's primary technical moat. The Terminal (BUY/SELL,
+F1–F7 workspaces) is the presentation layer; escrow, chat, and reputation depend on
+verification outputs being correct, timely, and provable.
+
+This document defines:
+  - How each verification touchpoint in the current frontend maps to backend APIs
+  - Why verification MUST be asynchronous (5–60+ seconds, multi-provider, rate limits)
+  - Worker pipeline stages aligned with F2 "Verification Pipeline · Real-Time" UI
+  - Provider-specific adapter strategy (OpenAI, Anthropic, Google, etc.)
+  - Proof hashing for settlement/dispute evidence (not raw keys on-chain)
+  - Security rules: ephemeral key handling, encryption, fingerprints only in logs
+
+No code implementation is included. This is the execution blueprint for engineering.
+
+================================================================================
+2. STRATEGIC POSITION: VERIFICATION AS MOAT
+================================================================================
+
+Competitive modules ranked by defensibility:
+
+  Module                    Barrier    Notes
+  ------------------------  ---------  ------------------------------------------
+  Provider adapters         Very high  Per-vendor quota/billing/rate-limit logic
+  Quota inference           Very high  OpenAI does not expose simple remaining quota
+  Fraud / risk analysis     High       Shared keys, blacklist, reseller detection
+  Live monitoring           High       Continuous heartbeat vs one-shot verify
+  Rotation validation       High       Old/new key revocation proof
+  Verification proofs       High       Hash chain + optional on-chain anchor
+  Marketplace UI            Medium     Replicable terminal patterns
+  Escrow                    Medium     Standard DeFi patterns
+
+Long-term positioning:
+
+    Tokenta = API Asset Verification Network
+    Marketplace Terminal = UI layer on top of verified state
+
+================================================================================
+3. CURRENT FRONTEND SURFACE (TERMINAL UI AUDIT)
+================================================================================
+
+Based on: Tokenta Terminal Design Proposal (two-mode BUY/SELL architecture).
+
+3.1 Navigation — F2 Verification Workspace
+------------------------------------------------------------------------------
+  Location:     Side nav F2 → VerifyView (App.tsx)
+  Panel F2.1:   "Verification Pipeline · Real-Time"
+                Columns: TIMESTAMP | ASSET | STEP | ATTEST HASH | RESULT | LATENCY
+                Data source (mock): verifyFeed[] in tokenta-data.ts
+  Panel F2.2:   "Proof Composition" — ZK-PROOF, TEE Attestation, Signature, Quota
+  [IMPLEMENTED 2026-05-19 — partial] GET /api/v1/verification/metrics/composition; health includes proofComposition;
+    VerifyView polls API (MOCK fallback offline). Real ZK/TEE attestors not integrated.
+  Panel F2.3:   "Pipeline Health" — success rate, queue depth, P50/P99 latency
+  Banner:       VerificationModeBanner — DIRECT_KEY_TEST | PROXY_HEARTBEAT |
+                ROTATION_VALIDATION
+
+  Backend expectation:
+    - Global network verification stream (all jobs), not only user-scoped
+    - Ops metrics for queue depth, validator count, throughput (421 proofs/s in mock)
+
+3.2 SELL — List on Marketplace (P2P Listing)
+------------------------------------------------------------------------------
+  Location:     F1 Market → SELL → LIST ON MARKETPLACE tab → CREATE LISTING
+                Opens ListApiModal (terminal-flows.tsx, code SL.1)
+  User inputs:
+    - API PROVIDER (dropdown: OpenAI-compatible, Anthropic, Google, Custom)
+    - API KEY (password field)
+    - QUOTA TO SELL, ASK PRICE
+    - Consent: controlled sampling; typical ~25-75 tokens (mechanism spec 4G, 18)
+  CTA:          [LIST API · START VERIFY]
+  Post-submit:  Navigates to F2 VERIFY (onSubmitted callback)
+
+  Spec alignment (product doc):
+    - Form: provider, access type, quantity, price, deposit calc, verification upload
+    - Status: PENDING / PASSED / FAILED
+  Gap in current UI: No live step timeline in modal; should route to job progress view
+
+3.3 SELL — Tokenta Buyback
+------------------------------------------------------------------------------
+  Location:     F1 → SELL → TOKENTA BUYBACK tab → BuybackOfferCard → SELL TO TOKENTA
+  Spec flow:    Enter quantity → submit API key → platform runs 3-step verification
+                → deposit calc → key rotation wizard
+  Current UI:   Modal/onSellToTokenta stub; buyback verification panel in spec F2.2.2
+
+3.4 BUY — Pre-Purchase Verification
+------------------------------------------------------------------------------
+  Location:     F2 (buyer context) + order detail "REQUEST NEW VERIFICATION"
+  Spec:         Order-bound verification; P2P pays 0.1% for re-verify; Tokenta Direct LIVE
+  Methods:      DIRECT_KEY_TEST (P2P) vs PROXY_HEARTBEAT (Tokenta Direct)
+
+3.5 Market Listings — Verification Display
+------------------------------------------------------------------------------
+  Location:     F1 BUY mode table columns VERIFY, TRUST
+  P2P:          verificationTimestamp (e.g. "30s ago", "2h ago") — static snapshot
+  Tokenta:      "LIVE" + pulsing indicator — implies continuous verification
+  Types:        verificationMethod in EnhancedListing (trading-types.ts):
+                DIRECT_KEY_TEST | PROXY_HEARTBEAT | ROTATION_VALIDATION | ZK_PROOF |
+                TEE_ATTEST | SIGNATURE | QUOTA_CHK
+
+3.6 Orders — Verification Trail
+------------------------------------------------------------------------------
+  Location:     F4 Orders → OrderDetailView → "VERIFICATION TRAIL (THIS ORDER)"
+  Data:         Filtered verifyFeed by asset; links to F2 global pipeline
+
+3.7 Status Strip (Network Pulse)
+------------------------------------------------------------------------------
+  Metric:       VERIFY THROUGHPUT 421/s, PROOF SUCCESS 99.41%
+  Backend:      Aggregated from verification service metrics endpoint
+
+================================================================================
+4. END-TO-END USER PIPELINES (UI → API)
+================================================================================
+
+4.1 Pipeline A — Seller Lists API (P2P) — PRIMARY ONBOARDING FLOW
+------------------------------------------------------------------------------
+
+  [UI] SELL → ListApiModal → LIST API · START VERIFY
+         |
+         v
+  [API] POST /v1/verification/jobs
+         Body: { context: "LISTING_DRAFT", provider, apiKey, expectedQuantity,
+                 accessMethod, listingDraftId?, consentProbeQuotaPct: 3 }
+         Response: { jobId, status: "PENDING", streamUrl }
+         |
+         v
+  [UI] Navigate F2 or dedicated /verification/jobs/{jobId} progress view
+         Subscribe: GET /v1/verification/jobs/{jobId}/events (SSE)
+         |
+         v
+  [Worker] Execute pipeline stages (see Section 9)
+         |
+         v
+  [API] Job terminal state: PASSED | FAILED | NEEDS_USER_ACTION
+  [UI]  PASSED → enable CREATE LISTING / auto-publish if consent checked
+         FAILED → show reason, RESUBMIT
+         |
+         v
+  [API] POST /v1/listings (separate marketplace API) only if verificationId valid
+
+4.2 Pipeline B — Tokenta Buyback Sale
+------------------------------------------------------------------------------
+
+  [UI] SELL → TOKENTA BUYBACK → SELL TO TOKENTA → quantity + key
+         |
+         v
+  [API] POST /v1/verification/jobs
+         Body: { context: "TOKENTA_BUYBACK", provider, apiKey, expectedQuantity,
+                 buybackOfferId }
+         |
+         v
+  [UI] Buyback verification panel (spec: Test 1/3, 2/3, 3/3)
+         |
+         v
+  [API] On PASSED → POST /v1/sell/tokenta-buyback/confirm
+         Body: { jobId, quantity, depositAcknowledged: true }
+         Triggers escrow + rotation workflow (F3/F4)
+
+4.3 Pipeline C — Buyer Pre-Purchase Re-Verification (P2P)
+------------------------------------------------------------------------------
+
+  [UI] F2 BUY context or Order detail → REQUEST NEW VERIFICATION
+         |
+         v
+  [API] POST /v1/verification/jobs
+         Body: { context: "PRE_PURCHASE", orderId, sellerListingId,
+                 payerPaysFee: true }
+         Fee: 0.1% of order value (escrow instruction separate)
+         |
+         v
+  [UI] Show verification log + hash for buyer evidence
+         |
+         v
+  [API] GET /v1/verification/proofs/{proofId} — downloadable attestation
+[IMPLEMENTED 2026-05-19] GET /verification/proofs/{hash}?download=1 returns JSON attachment.
+
+4.4 Pipeline D — Order-Bound Delivery Verification (Key Rotation)
+------------------------------------------------------------------------------
+
+  [UI] F4 Chat / rotation guide → seller submits new key
+         |
+         v
+  [API] POST /v1/verification/jobs
+         Body: { context: "KEY_ROTATION", orderId, newApiKey, oldKeyFingerprint }
+         Method: ROTATION_VALIDATION — prove old revoked, new works
+         |
+         v
+  [Worker] ROTATION_VALIDATION layer + fraud monitor (old key still active?)
+         |
+         v
+  [UI] Chat system messages + F3 escrow timeline updates via order events
+
+4.5 Pipeline E — Tokenta Direct Inventory (Platform Seller)
+------------------------------------------------------------------------------
+
+  Not user-submitted keys in Terminal. Internal ops console provisions inventory.
+  [Internal] POST /v1/admin/verification/jobs { context: "INVENTORY_INGEST" }
+  [UI]     Market shows LIVE + PROXY_HEARTBEAT from continuous monitor job
+  [API]    GET /v1/market/listings?filter=TOKENTA_DIRECT includes verificationState
+           [IMPLEMENTED 2026-05-20: GET /api/v1/market/listings — filter param not yet wired]
+
+================================================================================
+5. SYSTEM ARCHITECTURE OVERVIEW
+================================================================================
+
+                         +-------------------+
+                         |  Tokenta Terminal |
+                         |  (React / Privy) |
+                         +--------+----------+
+                                  |
+                    REST (sync)   |   SSE/WS (async events)
+                                  v
+                         +-------------------+
+                         |   API Gateway     |
+                         |   auth, rate limit|
+                         +--------+----------+
+                                  |
+          +-----------------------+-----------------------+
+          |                       |                       |
+          v                       v                       v
+ +----------------+    +-------------------+    +------------------+
+ | Verification   |    | Marketplace /     |    | Order / Escrow   |
+ | API Service    |    | Listings Service  |    | Service          |
+ +--------+-------+    +-------------------+    +------------------+
+          |
+          | enqueue
+          v
+ +----------------+       +------------------+
+ | Message Queue  | ----> | Verification     |
+ | (Redis/BullMQ  |       | Worker Pool        |
+ |  or SQS)       |       +--------+---------+
+ +----------------+                |
+                                   v
+                          +------------------+
+                          | Provider Adapter |
+                          | Layer            |
+                          +--------+---------+
+                                   |
+                    +--------------+--------------+
+                    v              v              v
+               [OpenAI]      [Anthropic]     [Google ...]
+
+          +------------------+
+          | Proof / Hash     |
+          | Service          |
+          +------------------+
+          | Risk / Fraud DB  |
+          +------------------+
+          | Secrets Vault    | (KMS — ephemeral decrypt in worker only)
+          +------------------+
+
+Design principles:
+  1. Terminal never blocks on provider HTTP calls.
+  2. API keys never logged; never returned in GET responses.
+  3. All user-visible progress via event stream.
+  4. verificationId + proofHash link listings, orders, and disputes.
+
+================================================================================
+6. ASYNC VERIFICATION ARCHITECTURE
+================================================================================
+
+WHY ASYNC (mandatory):
+
+  - Provider latency: 200ms–30s per probe; multiple probes per job
+  - Rate limits: Exponential backoff, per-provider concurrency caps
+[IMPLEMENTED 2026-05-19 — partial] provider-limiter.ts (PROVIDER_MAX_CONCURRENT);
+  BullMQ/redis/memory queues; global fair queue across regions TBD.
+  - Multi-step pipeline: 5–12 stages with partial failure recovery
+  - Rotation/fraud: May require delayed re-check (old key active after 7 days)
+  - Scale: Status strip targets 400+ proofs/s network-wide
+
+ANTI-PATTERN (forbidden):
+
+  POST /verify → server blocks 30s → returns PASS
+
+  This freezes Terminal UI and violates trust UX (no visible pipeline).
+
+CORRECT PATTERN:
+
+  POST /jobs → 202 Accepted { jobId }
+  Client → SSE stream until terminal state
+  Optional → GET /jobs/{id} for reconnect/poll fallback
+
+Job SLA tiers:
+
+  Tier          Target duration   Context
+  ------------  ----------------  ---------------------------------
+  FAST          < 15s             Pre-purchase spot check
+  STANDARD      < 60s             Listing onboarding
+  EXTENDED      < 180s            Rotation + fraud recheck
+  CONTINUOUS    recurring         Tokenta Direct LIVE heartbeat
+
+================================================================================
+7. REST API SPECIFICATION
+================================================================================
+
+Base URL: https://api.tokenta.network/v1
+Auth: Bearer JWT (Privy-verified wallet session) + request signing for sensitive ops
+[IMPLEMENTED 2026-05-19 — partial] Dev gate: REQUIRE_API_AUTH + API_DEV_TOKEN Bearer on /api/v1/*
+  (server/src/security/dev-auth.ts). privy-jwt.ts: HS256 (PRIVY_JWT_VERIFY) or JWKS (PRIVY_JWT_VERIFY=jwks).
+Content-Type: application/json
+
+------------------------------------------------------------------------------
+7.1 Start Verification Job
+------------------------------------------------------------------------------
+POST /verification/jobs
+
+Request:
+{
+  "context": "LISTING_DRAFT | TOKENTA_BUYBACK | PRE_PURCHASE | KEY_ROTATION | ORDER_DELIVERY",
+  "provider": "openai | anthropic | google | xai | custom",
+  "accessMethod": "DIRECT_KEY | PROXY_GATEWAY | KEY_ROTATION_REQUIRED",
+  "apiKey": "<plaintext — TLS only, never stored raw>",
+  "expectedQuantity": 100000,
+  "unit": "tokens | calls | tflop_hours",
+  "metadata": {
+    "listingDraftId": "lst_draft_abc",
+    "orderId": "ORD-78214",
+    "buybackOfferId": "BB-001",
+    "consentProbeQuotaPct": 3
+  }
+}
+
+Response 202:
+{
+  "jobId": "verif_01HXYZ",
+  "status": "PENDING",
+  "createdAt": "2026-05-19T10:30:00Z",
+  "streamUrl": "/v1/verification/jobs/verif_01HXYZ/events",
+  "pollUrl": "/v1/verification/jobs/verif_01HXYZ",
+  "estimatedDurationSec": 45
+}
+
+Errors:
+  400  INVALID_PROVIDER | MISSING_CONSENT | QUANTITY_OUT_OF_RANGE
+  401  UNAUTHORIZED
+  429  RATE_LIMITED (per-user job creation)
+  503  VERIFICATION_QUEUE_FULL
+
+------------------------------------------------------------------------------
+7.2 Get Job Status (poll fallback)
+------------------------------------------------------------------------------
+GET /verification/jobs/{jobId}
+
+Response 200:
+{
+  "jobId": "verif_01HXYZ",
+  "status": "PENDING | RUNNING | PASSED | FAILED | CANCELLED | EXPIRED",
+  "context": "LISTING_DRAFT",
+  "provider": "openai",
+  "progress": {
+    "completedSteps": 4,
+    "totalSteps": 6,
+    "currentStep": "RISK_ANALYSIS"
+  },
+  "result": {
+    "verifiedQuantity": 102340,
+    "declaredQuantity": 100000,
+    "riskScore": 0.12,
+    "verificationMethod": "DIRECT_KEY_TEST",
+    "proofId": "proof_abc",
+    "proofHash": "0xA1B2C3D4...",
+    "failureCode": null,
+    "failureMessage": null
+  },
+  "timestamps": {
+    "startedAt": "...",
+    "completedAt": "..."
+  }
+}
+
+Note: Response NEVER includes apiKey or full provider response bodies.
+
+------------------------------------------------------------------------------
+7.3 Cancel Job
+------------------------------------------------------------------------------
+POST /verification/jobs/{jobId}/cancel
+
+Response 200: { "status": "CANCELLED" }
+
+------------------------------------------------------------------------------
+7.4 List Global Verification Feed (F2 pipeline table)
+------------------------------------------------------------------------------
+GET /verification/feed?limit=50&cursor=...
+
+Query: asset, result, method, since
+
+Response 200:
+{
+  "items": [
+    {
+      "timestamp": "2026-05-19T10:42:18.214Z",
+      "assetTicker": "GPT4-CMP",
+      "step": "QUOTA_CHK",
+      "proofHash": "0x9af2…41bc",
+      "result": "PASS",
+      "latencyMs": 184,
+      "method": "DIRECT_KEY_TEST",
+      "jobId": "verif_..."
+    }
+  ],
+  "nextCursor": "..."
+}
+
+------------------------------------------------------------------------------
+7.5 Pipeline Health Metrics (F2.3)
+------------------------------------------------------------------------------
+GET /verification/metrics/health
+
+[IMPLEMENTED 2026-05-19] GET /api/v1/metrics/health includes proofComposition + worker_region.
+[IMPLEMENTED 2026-05-19] GET /api/v1/verification/metrics/composition — F2.2 rows from probe paradigms.
+[IMPLEMENTED 2026-05-19] POST /api/v1/orders/:orderId/escrow/fund|release — dev stub + ESCROW_SIGNATURE.
+
+Response 200:
+{
+  "successRatePct": 99.41,
+  "failedLastHour": 18,
+  "latencyP50Ms": 61,
+  "latencyP99Ms": 412,
+  "activeValidators": 124,
+  "queueDepth": 42,
+  "throughputPerSec": 421,
+  "proofComposition": {
+    "zkProofPct": 62,
+    "teeAttestPct": 24,
+    "signaturePct": 11,
+    "quotaChkPct": 3
+  }
+}
+
+------------------------------------------------------------------------------
+7.6 Get Proof / Download Attestation
+------------------------------------------------------------------------------
+GET /verification/proofs/{proofId}
+
+Response 200:
+{
+  "proofId": "proof_abc",
+  "proofHash": "0xA1B2C3D4...",
+  "payload": {
+    "provider": "openai",
+    "verifiedQuantity": 102340,
+    "result": "PASS",
+    "timestamp": 1747623000,
+    "method": "DIRECT_KEY_TEST",
+    "jobId": "verif_01HXYZ"
+  },
+  "signature": "<platform Ed25519 over canonical JSON>",
+  "downloadUrl": "https://.../proofs/proof_abc.json"
+}
+
+------------------------------------------------------------------------------
+7.7 Attach Verification to Listing (gate)
+------------------------------------------------------------------------------
+POST /listings/{listingId}/bind-verification
+
+Request: { "verificationJobId": "verif_01HXYZ", "proofId": "proof_abc" }
+Response 200: { "listingId", "status": "ACTIVE", "verificationTimestamp": "..." }
+
+Fails 409 if job not PASSED or proof expired (TTL).
+
+------------------------------------------------------------------------------
+7.8 Tokenta Buyback Confirm (post-verify)
+------------------------------------------------------------------------------
+POST /sell/tokenta-buyback/confirm
+
+Request:
+{
+  "verificationJobId": "verif_01HXYZ",
+  "buybackOfferId": "BB-001",
+  "quantity": 50000,
+  "depositAcknowledged": true
+}
+
+Response 201: { "orderId", "escrowId", "rotationDeadline" }
+
+------------------------------------------------------------------------------
+7.9 Internal — Inventory ingest (admin only)
+------------------------------------------------------------------------------
+POST /admin/verification/jobs
+Auth: mTLS + service role
+
+Body: { context: "INVENTORY_INGEST", provider, encryptedKeyRef, ... }
+
+================================================================================
+8. REAL-TIME EVENT STREAM (SSE / WebSocket)
+================================================================================
+
+Primary: Server-Sent Events (SSE) — simpler, Terminal-friendly, unidirectional
+
+GET /v1/verification/jobs/{jobId}/events
+Headers: Authorization, Last-Event-ID (reconnect)
+
+[IMPLEMENTED 2026-05-19 — partial] SSE replays buffered job.events on connect; GET /jobs/{id}
+  returns events[] snapshot for client reconnect (VerificationJobPanel hydrates).
+
+Event format (JSON in data:):
+
+  event: step_started
+  data: {"jobId","step":"CONNECTIVITY","index":1,"total":6,"message":"..."}
+
+  event: step_completed
+  data: {"jobId","step":"CONNECTIVITY","result":"PASS","latencyMs":184,
+         "partialHash":"0x..."}
+
+  event: job_progress
+  data: {"jobId","completedSteps":4,"totalSteps":6,"percent":66}
+
+  event: job_completed
+  data: {"jobId","status":"PASSED","verifiedQuantity":102340,
+         "proofHash":"0xA1B2...","proofId":"proof_abc"}
+
+  event: job_failed
+  data: {"jobId","status":"FAILED","failureCode":"INSUFFICIENT_QUOTA",
+         "failureMessage":"Verified 12k, declared 50k"}
+
+UI mapping (seller onboarding — matches product spec):
+
+  [x] Job Created          ← event: job_created (immediate after POST)
+  [ ] API Connectivity     ← step CONNECTIVITY
+  [ ] Quota Validation     ← step QUOTA
+  [ ] Rate Limit Check     ← step RATE_LIMIT
+  [ ] Risk Analysis        ← step RISK_ANALYSIS
+  [ ] Finalization         ← step FINALIZE + job_completed
+
+Buyback 3-step UI:
+
+  Test 1/3 API connectivity  → CONNECTIVITY
+  Test 2/3 Quota validation  → QUOTA
+  Test 3/3 Rate limit check  → RATE_LIMIT
+
+WebSocket alternative (optional for F2 global feed):
+
+  WS /v1/verification/stream
+  Subscribe: { "channels": ["network.feed", "job:verif_xxx"] }
+
+Terminal F2 table appends rows on network.feed events (anonymized job refs).
+
+Reconnect policy:
+  - Client stores lastEventId
+  - Server replays buffer (last 5 min in Redis stream)
+  - If job terminal, SSE closes with event: stream_end
+
+================================================================================
+9. VERIFICATION WORKER PIPELINE (EXECUTION LAYERS)
+================================================================================
+
+Worker consumes: verification.jobs queue message { jobId }
+
+Stage order (configurable per context):
+
+  STAGE 0 — job_created
+    Persist job, emit event, decrypt key in memory (KMS envelope)
+
+  STAGE 1 — CONNECTIVITY (Layer 1)
+    Provider adapter: health endpoint probe
+    OpenAI example: GET /v1/models, Authorization Bearer
+    Checks: HTTP 200, auth valid, latency, region/account metadata
+    Output: { connectivity: PASS|FAIL, latencyMs, accountHints }
+
+  STAGE 2 — QUOTA (Layer 2) — HARDEST
+    Provider-specific strategies (see Section 10)
+    Output: { verifiedQuantity, confidence: high|medium|low, method }
+
+  STAGE 3 — RATE_LIMIT (Layer 2b)
+    Infer limits from headers, 429 behavior, tier endpoints
+    Output: { requestsPerMin, tokensPerMin, burst }
+
+  STAGE 4 — ACCESS_METHOD (Layer 3)
+    DIRECT_KEY: successful inference call
+    PROXY_GATEWAY: heartbeat against Tokenta proxy edge
+    KEY_ROTATION: compare old fingerprint vs new key probes
+
+  STAGE 5 — RISK_ANALYSIS (Layer 4)
+    See Section 12
+
+  STAGE 6 — FINALIZE
+    Canonical proof payload → SHA-256 → proofHash
+    Sign with platform key
+    Store proof record; update job PASSED|FAILED
+    Zeroize apiKey from memory
+    If LISTING_DRAFT: notify Listings service
+    Emit job_completed | job_failed
+
+Failure handling:
+  - Retryable: 429, 5xx, timeout → exponential backoff max 3 per stage
+  - Non-retryable: 401 invalid key → immediate FAILED
+  - Partial PASS: buyback may offer resubmit at verified lower quantity
+
+================================================================================
+10. PROVIDER ADAPTER LAYER
+================================================================================
+
+Directory structure (implementation reference):
+
+  /providers
+    /openai      OpenAIVerifier implements ProviderVerifier
+    /anthropic   AnthropicVerifier
+    /google      GoogleGeminiVerifier
+    /xai         XaiVerifier
+    /custom      HttpCustomVerifier
+
+Interface (conceptual):
+
+  interface ProviderVerifier {
+    providerId: string;
+    connectivity(ctx): ConnectivityResult;
+    quota(ctx): QuotaResult;
+    rateLimits(ctx): RateLimitResult;
+    probeUsage(ctx, maxProbePct): ProbeUsageResult;
+  }
+
+OpenAI quota strategies (multi-pronged):
+  - usage API (if available for key type)
+  - billing/credits endpoint
+  - minimal completion probe with token cap
+  - rate-limit header inference
+  - Output: estimatedRemainingTokens + confidence score
+
+Anthropic:
+  - credits balance API
+  - model list + test message
+  - organization tier flags
+
+Google Gemini:
+  - cloud project quota
+  - billing enabled check
+  - generateContent probe
+
+Each adapter isolated for:
+  - Legal/ToS differences
+  - API version upgrades
+  - Provider-specific fraud signals
+
+This layer is the highest barrier to entry for competitors.
+
+================================================================================
+11. ACCESS METHOD VERIFICATION MATRIX
+================================================================================
+
+  Access Method           Verification approach
+  ----------------------  -------------------------------------------------
+  DIRECT_KEY              Live API call + quota probe; fingerprint key
+  PROXY_GATEWAY           Tokenta edge heartbeat; no raw key to buyer
+  KEY_ROTATION_REQUIRED   New key probe + old key revocation check +
+                          delayed fraud re-monitor (7–30 days)
+
+Maps to trading-types.ts AccessMethod and VerificationMethod enums.
+
+Frontend VerificationModeBanner maps to worker routing:
+  DIRECT_KEY_TEST      → STAGES 1–2–3 on provider adapter
+  PROXY_HEARTBEAT      → STAGE 4 proxy subsystem
+  ROTATION_VALIDATION  → STAGE 4 rotation + STAGE 5 fraud timing
+
+================================================================================
+12. RISK ANALYSIS ENGINE
+================================================================================
+
+Inputs:
+  - keyFingerprint (HMAC-SHA256 of key, platform pepper)
+  - seller wallet address
+  - provider account hints from connectivity
+  - historical disputes, slashes, arbitration losses
+
+Checks:
+
+  1. Shared key detection
+     Same fingerprint from multiple sellers → block or flag
+
+  2. Blacklist
+     Keys/accounts with prior fraud or provider ban
+
+  3. Abnormal usage velocity
+     Token burn rate vs declared inventory
+
+  4. Reseller / gray market proxy
+     Response headers, endpoint patterns (ties to GRAY_MARKET UI flag)
+
+  5. Revocation risk score
+     Heuristics for keys likely to be rotated/revoked by provider
+
+Output:
+  riskScore 0.0–1.0
+  riskFlags: string[]
+  recommendation: ALLOW | REVIEW | DENY
+
+Feeds:
+  - trustLabel on listings (92, TOKENTA GUARANTEED)
+  - deposit requirements (150% P2P, 200% buyback)
+  - F6 reputation events (VERIFY-FAIL, VERIFY-PASS-STREAK)
+
+================================================================================
+13. VERIFICATION PROOF & HASH (ON-CHAIN ANCHOR)
+================================================================================
+
+Canonical payload (sorted JSON):
+
+{
+  "v": 1,
+  "provider": "openai",
+  "verifiedQuantity": 102340,
+  "declaredQuantity": 100000,
+  "result": "PASS",
+  "method": "DIRECT_KEY_TEST",
+  "timestamp": 1747623000,
+  "jobId": "verif_01HXYZ",
+  "keyFingerprint": "fp_...",
+  "riskScore": 0.12
+}
+
+proofHash = sha256(canonical_payload_bytes)
+display = "0x" + first_8_bytes_hex + "…" (Terminal attestation column)
+
+On-chain (optional Phase 2):
+  - Anchor proofHash to Tokenta L2 settlement contract
+  - NEVER anchor raw API key
+  - Dispute resolution references proofId + chain tx
+
+[IMPLEMENTED 2026-05-19 — partial] Dev anchor registry: server/src/verification/proof-anchor.ts
+  GET /api/v1/verification/proofs/{proofHash}/anchor — status NONE|PENDING|ANCHORED|FAILED
+  POST same path — register; confirmMock or PROOF_ANCHOR_AUTO_MOCK simulates L2 txHash
+  Worker calls maybeAutoAnchor on job complete when PROOF_ANCHOR_AUTO_MOCK=true
+  PROOF_ANCHOR_RPC_URL + PROOF_ANCHOR_USE_CONTRACT via settlement-contract.ts (viem encodeFunctionData)
+  + data/tokenta-settlement-anchor.abi.json; proof-anchor-l2 contract calldata test when PROOF_ANCHOR_USE_CONTRACT.
+[IMPLEMENTED 2026-05-19] GET /admin/audit-log?type= filter; worker-zeroize.test.ts confirms apiKey cleared post-job.
+[IMPLEMENTED 2026-05-19] LIVE monitor scheduler-lock.ts — Redis SET NX single leader when REDIS_URL set.
+[IMPLEMENTED 2026-05-19] GET /api/v1/openapi.json — verificationOpenApi fragment (§7 routes).
+
+Order detail "DOWNLOAD HASH" → GET /proofs/{id}
+
+================================================================================
+14. DATA MODEL & PERSISTENCE
+================================================================================
+
+Table: verification_jobs
+  job_id            PK
+  user_id           wallet / privy id
+  context           enum
+  provider          enum
+  access_method     enum
+  status            enum
+  declared_quantity bigint
+  verified_quantity bigint nullable
+  risk_score        float nullable
+  proof_id          FK nullable
+  failure_code      text nullable
+  created_at, started_at, completed_at
+  metadata_json     jsonb
+
+Table: verification_job_steps
+  step_id           PK
+  job_id            FK
+  step_name         enum
+  status            enum
+  result            enum
+  latency_ms        int
+  detail_json       jsonb (no secrets)
+  created_at
+
+Table: verification_proofs
+  proof_id          PK
+  job_id            FK unique
+  proof_hash        char(66)
+  payload_json      jsonb (canonical)
+  signature         bytes
+  expires_at        timestamp
+
+Table: key_fingerprints
+  fingerprint       PK
+  first_seen_at, last_seen_at
+  seller_count      int
+  blacklisted       bool
+
+Secrets:
+  encrypted_key_blob stored ONLY if inventory/policy requires;
+  prefer KMS reference + ephemeral decrypt in worker.
+  Listing publish: store proxy reference or sealed seller vault ID, not raw key.
+
+Queue:
+  Redis Stream or BullMQ queue name: verification:jobs:{priority}
+  Dead letter queue: verification:dlq
+
+[IMPLEMENTED 2026-05-19 — partial] Queue backends: bull-queue.ts (USE_BULLMQ, retries, DLQ
+  tokenta:verification:dlq), redis-queue.ts (list), memory fallback in queue.ts.
+
+================================================================================
+15. SECURITY: API KEY LIFECYCLE
+================================================================================
+
+[IMPLEMENTED 2026-05-19 — partial] DEV_CREDENTIAL_VAULT / KMS_VAULT_ENABLED stubs in
+  server/src/security/credential-vault.ts; listing credentialRef on POST /listings;
+  worker still receives ephemeral apiKey on job payload; production Vault integration TBD.
+[IMPLEMENTED 2026-05-19] DEV_CREDENTIAL_VAULT_ENCRYPTED + encrypted-vault.ts (AES-256-GCM at rest).
+[IMPLEMENTED 2026-05-19] Automated E2E: verification-e2e.test.ts (npm run test:e2e);
+  OpenAI HTTP fixtures: openai-http.integration.test.ts.
+[IMPLEMENTED 2026-05-19] secure-zero.ts — Buffer fill(0) + clear apiKey/oldApiKey on worker finalize.
+[IMPLEMENTED 2026-05-19] job-credential-resolver.ts — decrypt listing credentialRef in worker before probes.
+
+  INGEST (POST /jobs)
+    - TLS 1.3 required
+    - Key held in request memory only until worker picks up
+    - Immediately encrypted with KMS (AES-256-GCM) for queue message if needed
+    - Prefer: pass key reference via secure enclave message, not DB plaintext
+
+  WORKER
+    - Decrypt in isolated worker process
+    - Memory zeroized after FINALIZE
+    - No key in logs, traces, error reports (scrubbing middleware)
+
+  AFTER VERIFICATION
+    - Raw key deleted; retain fingerprint + proof only
+    - For PROXY_GATEWAY: store Tokenta-issued proxy credential, not seller key
+    - For buyer delivery: separate sealed delivery channel (order fulfillment svc)
+
+  DISPLAY
+    - Terminal shows sk-proj-...J8K2 masked fingerprint only
+
+  RE-VERIFY
+    - User must re-submit key; no "show my key" API
+
+================================================================================
+16. CONTINUOUS VERIFICATION NETWORK (PHASE 2+)
+================================================================================
+
+Beyond one-shot jobs:
+
+  Scheduled heartbeat jobs per active listing / inventory SKU
+  Intervals: 5 min (Tokenta Direct), 30 min (high-value P2P), 1 hour (standard)
+
+  Worker lite pipeline: CONNECTIVITY + QUOTA quick probe
+
+  State transitions:
+    LIVE → STALE (no heartbeat 2x interval)
+    STALE → REVOKED (provider 401)
+    → UI: LIVE badge, verificationTimestamp "12s ago"
+
+  Market impact:
+    Auto-delist on REVOKED
+    Buyer alerts on STALE
+    Tokenta Direct: ops alert for replenishment
+
+  This enables "real-time verified API market" positioning.
+
+================================================================================
+17. SERVICE TOPLOGY & DEPLOYMENT
+================================================================================
+
+Recommended initial stack:
+
+  - API Gateway: Kong / AWS API Gateway / Cloudflare
+  - Verification API: Node or Go stateless service (horizontally scaled)
+  - Workers: BullMQ on Redis or AWS SQS + Lambda/ECS workers
+  - DB: PostgreSQL (jobs, proofs, listings refs)
+  - Cache: Redis (event replay, rate limits, feed buffer)
+  - Secrets: AWS KMS / HashiCorp Vault
+  - SSE: API service maintains Redis pub/sub per job channel
+
+Network isolation:
+  - Workers in private subnet with egress to provider APIs
+  - No inbound from internet to workers
+
+Multi-region (later):
+  - Provider-adjacent workers (US-East for OpenAI) to reduce latency
+[IMPLEMENTED 2026-05-19 — partial] WORKER_REGION, WORKER_REGIONS, USE_REGIONAL_QUEUES,
+  GET /api/v1/admin/worker-topology + /admin/worker-heartbeats; BullMQ per region when enabled.
+[IMPLEMENTED 2026-05-19 — partial] HASHICORP_VAULT_ENABLED + VAULT_ADDR KV v2 credential storage.
+
+================================================================================
+18. OBSERVABILITY & SLOs
+================================================================================
+
+Metrics (Prometheus / Datadog):
+  - verification_job_duration_seconds (histogram by provider, context)
+  - verification_step_failures_total (by step, failure_code)
+  - verification_queue_depth
+  - verification_throughput_per_second
+  - provider_api_latency_ms (by provider)
+
+SLOs:
+  - 99% of FAST jobs complete < 15s
+  - 99% of STANDARD jobs complete < 60s
+  - 99.5% pipeline availability
+  - < 0.1% false PASS rate (audited via dispute feedback loop)
+
+Alerts:
+  - queue_depth > 500 for 5 min
+  - success_rate < 95% over 1 hour
+  - provider error spike (OpenAI 5xx)
+
+F2 UI "Pipeline Health" = direct query of these metrics.
+
+[IMPLEMENTED 2026-05-19 — partial] Prometheus text exposition at GET /metrics/prometheus
+  and /api/v1/metrics/prometheus (server/src/metrics/prometheus.ts). Gauges include
+  queue_depth, slo_under_60s_pct, p50_duration_ms, monitor LIVE/STALE/REVOKED, provider
+  limiter. Import docs/monitoring/grafana-verification-slo.json for scrape job template.
+
+================================================================================
+19. IMPLEMENTATION PHASES & MILESTONES
+================================================================================
+
+Phase 0 — Foundation (Weeks 1–2) ............................... [DONE 2026-05-20]
+  - Job model + POST/GET /verification/jobs .................. [DONE]
+  - Redis queue + single worker ................................ [PARTIAL — redis-queue or memory]
+  - SSE event stream ........................................... [DONE]
+  - OpenAI connectivity + basic quota adapter .................. [DONE]
+  - Terminal: wire ListApiModal → real job + progress UI ....... [DONE]
+
+Phase 1 — Seller Onboarding (Weeks 3–4) ........................ [DONE 2026-05-20 — dev/in-memory]
+  - Full pipeline stages for LISTING_DRAFT ..................... [DONE — SSE steps emitted]
+  - Proof hash generation + bind-verification on listing ....... [DONE]
+  - F2 feed from real network events ........................... [DONE — mock fallback when empty]
+  - GET /market/listings + F1 VERIFY column .................... [DONE]
+  - Risk: shared key + blacklist + abuse §4F ................. [DONE]
+
+Phase 2 — Buyback & Rotation (Weeks 5–6) ....................... [DONE — dev path]
+  - Anthropic + Gemini provider adapters ....................... [DONE]
+  - TOKENTA_BUYBACK context + 3-step UI ........................ [DONE]
+  - POST /sell/tokenta-buyback/confirm ......................... [DONE]
+  - OVERCLAIMED -> QUANTITY_MISMATCH (buyback strict) ........... [DONE]
+  - KEY_ROTATION context + order integration ................... [DONE]
+  - Fraud monitor: old key still active ........................ [DONE]
+
+Phase 3 — Buyer Flows (Weeks 7–8) ............................ [STARTED]
+  - PRE_PURCHASE re-verify + fee ............................... [DONE]
+  - Order verification trail ................................... [DONE]
+  - Order verification trail
+  - Proof download
+
+Phase 4 — Continuous LIVE (Weeks 9–12) .......................... [MOSTLY DONE 2026-05-20]
+  - Heartbeat scheduler for Tokenta Direct + top P2P ........... [PARTIAL — probes.ts P2P L1]
+  - LIVE badge + STALE/REVOKED state machine ................... [DONE]
+  - Metrics dashboard for F2.3 ................................. [DONE]
+  - Grafana SLO import template ................................ [PARTIAL 2026-05-19]
+             docs/monitoring/grafana-verification-slo.json
+
+Phase 5 — Advanced proofs (Future)
+  - ZK/TEE attestation integration (panel F2.2 composition) [PARTIAL 2026-05-19] paradigm-derived bars
+  - On-chain proof anchoring ........................... [PARTIAL 2026-05-19] viem anchorProofHash calldata + RPC stub
+
+================================================================================
+20. APPENDIX A: UI TRIGGER → API MATRIX
+================================================================================
+
+  UI Location                          Action                  API Endpoint
+  -----------------------------------  ----------------------  ---------------------------
+  ListApiModal                         LIST API · START VERIFY POST /verification/jobs
+                                       (context=LISTING_DRAFT)
+  F2 VerifyView                        Page load (global)      GET /verification/feed
+                                                               GET /metrics/health
+  F2 VerifyView                        Job progress (new)      SSE /jobs/{id}/events
+  Buyback card                         SELL TO TOKENTA         POST /verification/jobs
+                                                               (context=TOKENTA_BUYBACK)
+                                       then confirm            POST /sell/tokenta-buyback/confirm
+  Order detail                         REQUEST RE-VERIFY       POST /verification/jobs
+                                       (context=PRE_PURCHASE)
+  Order detail                         VIEW LOG / DOWNLOAD     GET /proofs/{id}
+  Market BUY                           Display verify col      GET /listings (includes
+                                                               verificationState)
+  Chat / rotation                      Submit new key          POST /verification/jobs
+                                       (context=KEY_ROTATION)
+  Status strip                         VERIFY THROUGHPUT       GET /metrics/health
+
+================================================================================
+21. APPENDIX B: VERIFICATION JOB STATE MACHINE
+================================================================================
+
+  PENDING → RUNNING → PASSED
+                    → FAILED
+                    → CANCELLED (user)
+  PENDING → EXPIRED (timeout 10 min no worker)
+
+  Step states: PENDING → RUNNING → PASS | FAIL | SKIP
+
+  PASSED requires: all required stages PASS (or WARN accepted per policy)
+
+================================================================================
+22. APPENDIX C: EVENT TYPE CATALOG
+================================================================================
+
+  job_created
+  step_started
+  step_completed
+  step_failed
+  job_progress
+  job_completed
+  job_failed
+  stream_end
+
+Each event includes: jobId, timestamp, traceId (for support correlation)
+
+================================================================================
+END OF DOCUMENT
+================================================================================
+Tokenta Verification Engine Spec v0.1 — For internal engineering use.

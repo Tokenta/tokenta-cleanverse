@@ -1,0 +1,12 @@
+{
+  "contractName": "TokentaVerificationAnchor",
+  "version": "0.1.0",
+  "functions": [
+    {
+      "name": "anchorProofHash",
+      "inputs": [{ "name": "proofHash", "type": "bytes32" }],
+      "outputs": [{ "name": "txHash", "type": "bytes32" }]
+    }
+  ],
+  "note": "Scaffold ABI for Phase 5; calldata encoded via viem in settlement-contract.ts (deployed contract TBD)."
+}

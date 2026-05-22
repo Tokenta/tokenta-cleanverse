@@ -1,0 +1,51 @@
+# Local dependencies for verification engine (optional).
+# Usage: docker compose -f docker-compose.dev.yml up -d
+# Then: USE_DB_PERSISTENCE=true DATABASE_URL=postgresql://tokenta:tokenta@localhost:5432/tokenta_terminal
+#       USE_REDIS_QUEUE=true REDIS_URL=redis://localhost:6379
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tokenta
+      POSTGRES_PASSWORD: tokenta
+      POSTGRES_DB: tokenta_terminal
+    ports:
+      - "5432:5432"
+    volumes:
+      - tokenta_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tokenta -d tokenta_terminal"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Optional: separate BullMQ consumer (API still runs in-process worker by default)
+  verification-worker:
+    image: node:22-alpine
+    working_dir: /app
+    volumes: ["./server:/app"]
+    command: sh -c "npm ci && npm run worker:region"
+    environment:
+      REDIS_URL: redis://redis:6379
+      USE_BULLMQ: "true"
+      USE_REGIONAL_QUEUES: "true"
+      WORKER_REGION: us-east-1
+      VERIFICATION_MOCK: "true"
+    depends_on:
+      redis: { condition: service_healthy }
+    profiles:
+      - workers
+
+volumes:
+  tokenta_pg:
