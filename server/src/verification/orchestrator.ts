@@ -29,24 +29,18 @@ import { withProviderSlot } from "../jobs/provider-limiter.js";
 import { assessPlatformRisk } from "./platform-risk.js";
 import { appendAttestationProbes } from "./attestation-probes.js";
 import { buildProof, buildFailedProof, finishFail } from "./proof-build.js";
+import { resolveOpenAiCompatibleBaseUrl } from "./providers/openai-base.js";
 import type { RunJobInput, StepCallback } from "./job-input.js";
 
 export type { RunJobInput, StepCallback } from "./job-input.js";
 export { finishFail, buildProof, buildFailedProof } from "./proof-build.js";
 
 const MOCK_MODE = process.env.VERIFICATION_MOCK === "true";
-const P2P_L1_ONLY_DEFAULT = process.env.P2P_L1_ONLY_DEFAULT !== "false";
 
 function shouldRunL1Only(input: RunJobInput): boolean {
   if (input.context === "LIVE" || input.l1Only) return true;
   if (input.costLiability === "PLATFORM_SUBSIDIZED") return true;
-  if (
-    P2P_L1_ONLY_DEFAULT &&
-    input.context === "LISTING_DRAFT" &&
-    (input.costLiability ?? "SELLER_PAID") === "SELLER_PAID"
-  ) {
-    return true;
-  }
+  // LISTING_DRAFT always runs L2 so sellers get a capacity-backed PASS, not L1-only DEGRADED.
   return false;
 }
 
@@ -135,7 +129,10 @@ export async function runStandardVerification(input: RunJobInput): Promise<Verif
     cooldownActive: globalLockStore.get(fp) === "COOLDOWN_LOCKED",
   });
 
-  input.onStep?.("CONNECTIVITY", "L1 liveness probe");
+  input.onStep?.(
+    "CONNECTIVITY",
+    `L1 probe → ${resolveOpenAiCompatibleBaseUrl(input.provider, input.compatibleBaseUrl, input.providerSlug)} (${input.providerSlug ?? input.provider})`,
+  );
   const l1Deny = budget.canRunLiveness(budgetState(), envelope);
   if (l1Deny) {
     return finishFail(input, fp, envelope, costLiability, probes, probeModelId, fallbackUsed, "VERIFICATION_REFUSED_UNSAFE", l1Deny);
@@ -149,13 +146,54 @@ export async function runStandardVerification(input: RunJobInput): Promise<Verif
     mock: MOCK_MODE,
     provider: input.provider,
     compatibleBaseUrl: input.compatibleBaseUrl,
+    providerSlug: input.providerSlug,
+    l1Strategy: input.l1Strategy,
   };
-  const l1 = await withProviderSlot(() => runLiveness(input.provider, probeCtx));
+  let l1;
+  try {
+    l1 = await withProviderSlot(() => runLiveness(input.provider, probeCtx));
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return finishFail(
+      input,
+      fp,
+      envelope,
+      costLiability,
+      probes,
+      probeModelId,
+      fallbackUsed,
+      "NETWORK_UNREACHABLE",
+      msg,
+    );
+  }
   probes.push(l1.record);
 
   if (!l1.ok) {
     globalLockStore.applyFailure(fp, l1.errorCode ?? "INVALID_KEY");
-    return finishFail(input, fp, envelope, costLiability, probes, probeModelId, fallbackUsed, l1.errorCode ?? "INVALID_KEY", "Connectivity failed");
+    const probeBase = resolveOpenAiCompatibleBaseUrl(
+      input.provider,
+      input.compatibleBaseUrl,
+      input.providerSlug,
+    );
+    const detail =
+      l1.errorCode === "NETWORK_UNREACHABLE"
+        ? `Provider endpoint unreachable at ${probeBase} — check VPN, firewall, or base URL`
+        : humanizeOpenAiCompatibleError(
+            l1.errorCode ?? "INVALID_KEY",
+            probeBase,
+            l1.record.endpoint,
+          );
+    return finishFail(
+      input,
+      fp,
+      envelope,
+      costLiability,
+      probes,
+      probeModelId,
+      fallbackUsed,
+      l1.errorCode ?? "INVALID_KEY",
+      detail,
+    );
   }
 
   probeModelId = resolveProbeModelForProvider(input.provider, input.claimedModel, l1.modelIds);
@@ -164,8 +202,24 @@ export async function runStandardVerification(input: RunJobInput): Promise<Verif
   let l2Pass = false;
   let l2Skipped = false;
   let negativeProof = false;
-  let rateHeaders: Record<string, string> = {};
+  // Seed rateHeaders from L1 chat probe if available (spec §7 step 5 pre-L2 check).
+  let rateHeaders: Record<string, string> = l1.headers ?? {};
   let remainingTokens: number | null = null;
+
+  // Pre-L2 quota signal: if L1 response already shows remaining-tokens = 0,
+  // skip the micro-probe and immediately signal QUOTA_EXHAUSTED (spec §7 step 5).
+  const l1RemTok = rateHeaders["x-ratelimit-remaining-tokens"] ??
+    rateHeaders["anthropic-ratelimit-tokens-remaining"];
+  if (l1RemTok !== undefined && parseFloat(l1RemTok) === 0) {
+    input.onStep?.("QUOTA", "Pre-L2 header check: remaining-tokens=0 — skipping micro-probe");
+    negativeProof = true;
+    globalLockStore.applyFailure(fp, "QUOTA_EXHAUSTED");
+    return finishFail(
+      input, fp, envelope, costLiability, probes, probeModelId, fallbackUsed,
+      "QUOTA_EXHAUSTED",
+      "Rate-limit header shows zero remaining tokens. Account balance or quota is exhausted.",
+    );
+  }
 
   const l1Only = shouldRunL1Only(input);
   const estProbeTokens = envelope.maxTokensPerProbe + 22;
@@ -173,7 +227,7 @@ export async function runStandardVerification(input: RunJobInput): Promise<Verif
 
   if (l1Only) {
     l2Skipped = true;
-    input.onStep?.("QUOTA", "L2 skipped — L1-only policy (LIVE / platform / P2P default)");
+    input.onStep?.("QUOTA", "L2 skipped — L1-only policy (LIVE / platform subsidized)");
   } else if (!l1Only) {
     const manualTrigger =
       isUserTriggeredContext(input.context) && input.context !== "LIVE";
@@ -206,6 +260,8 @@ export async function runStandardVerification(input: RunJobInput): Promise<Verif
         mock: MOCK_MODE,
         provider: input.provider,
         compatibleBaseUrl: input.compatibleBaseUrl,
+        providerSlug: input.providerSlug,
+        l1Strategy: input.l1Strategy,
       }),
     );
     probes.push(l2.record);
@@ -231,6 +287,8 @@ export async function runStandardVerification(input: RunJobInput): Promise<Verif
             mock: MOCK_MODE,
             provider: input.provider,
             compatibleBaseUrl: input.compatibleBaseUrl,
+            providerSlug: input.providerSlug,
+            l1Strategy: input.l1Strategy,
           }),
         );
         probes.push(l2.record);
@@ -246,9 +304,11 @@ export async function runStandardVerification(input: RunJobInput): Promise<Verif
     }
     l2Pass = true;
     recordL2Probe(fp);
+    // Merge L2 headers over L1 headers so the best available rate signal wins.
+    rateHeaders = { ...rateHeaders, ...l2.headers };
     const rem =
-      l2.headers["x-ratelimit-remaining-tokens"] ??
-      l2.headers["anthropic-ratelimit-tokens-remaining"];
+      rateHeaders["x-ratelimit-remaining-tokens"] ??
+      rateHeaders["anthropic-ratelimit-tokens-remaining"];
     if (rem) remainingTokens = parseFloat(rem);
     if (
       MOCK_MODE &&

@@ -79,13 +79,15 @@ function computeClampedTooltipPosition(
 type Props = {
   open: boolean;
   stepIndex: number;
+  steps?: TourStep[];
   onStepChange: (index: number) => void;
   onComplete: () => void;
   onSkip: () => void;
 };
 
-export function UserTour({ open, stepIndex, onStepChange, onComplete, onSkip }: Props) {
-  const step = TOUR_STEPS[stepIndex];
+export function UserTour({ open, stepIndex, steps: stepsProp, onStepChange, onComplete, onSkip }: Props) {
+  const steps = stepsProp ?? TOUR_STEPS;
+  const step = steps[stepIndex];
   const isCongrats = step?.kind === "congrats";
   const isCenter = step?.kind === "center";
   const [spot, setSpot] = useState<Rect | null>(null);
@@ -139,16 +141,16 @@ export function UserTour({ open, stepIndex, onStepChange, onComplete, onSkip }: 
 
   if (!open || !step) return null;
 
-  const total = TOUR_STEPS.length - 1;
+  const total = steps.length - 1;
   const progress = isCongrats ? 100 : Math.round((stepIndex / total) * 100);
 
   const goNext = () => {
-    if (stepIndex >= TOUR_STEPS.length - 1) {
+    if (stepIndex >= steps.length - 1) {
       onComplete();
       return;
     }
-    if (stepIndex === TOUR_STEPS.length - 2) {
-      onStepChange(TOUR_STEPS.length - 1);
+    if (stepIndex === steps.length - 2) {
+      onStepChange(steps.length - 1);
       return;
     }
     onStepChange(stepIndex + 1);
@@ -209,13 +211,13 @@ export function UserTour({ open, stepIndex, onStepChange, onComplete, onSkip }: 
           <TourCard
             step={step}
             stepIndex={stepIndex}
-            totalSteps={TOUR_STEPS.length - 1}
+            totalSteps={steps.length - 1}
             progress={progress}
             onPrev={goPrev}
             onNext={goNext}
             onSkip={onSkip}
             showPrev={stepIndex > 0}
-            isLastContent={stepIndex === TOUR_STEPS.length - 2}
+            isLastContent={stepIndex === steps.length - 2}
           />
         </motion.div>
       ) : (
@@ -236,13 +238,13 @@ export function UserTour({ open, stepIndex, onStepChange, onComplete, onSkip }: 
           <TourCard
             step={step}
             stepIndex={stepIndex}
-            totalSteps={TOUR_STEPS.length - 1}
+            totalSteps={steps.length - 1}
             progress={progress}
             onPrev={goPrev}
             onNext={goNext}
             onSkip={onSkip}
             showPrev={stepIndex > 0}
-            isLastContent={stepIndex === TOUR_STEPS.length - 2}
+            isLastContent={stepIndex === steps.length - 2}
           />
         </motion.div>
       )}

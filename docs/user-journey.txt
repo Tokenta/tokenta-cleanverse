@@ -1,0 +1,697 @@
+TOKENTA TERMINAL — COMPLETE USER JOURNEY DOCUMENTATION
+=======================================================
+Version: May 2026
+Applies to: Tokenta Terminal web app (BUY mode and SELL mode)
+
+This document describes the full user journey for both the SELL portal and the
+BUY portal. Each step lists what the user sees, what they click, and what
+happens next in the system.
+
+---
+
+NAVIGATION REFERENCE
+---------------------
+The terminal is divided into workspaces, accessible from the left sidebar (F1-F7):
+
+  F1  MARKET      — Browse listings (BUY) / Create listings (SELL)
+  F2  VERIFY      — Active verification job progress and pipeline metrics
+  F3  ESCROW      — Escrow status + wallet balances
+  F4  ORDERS      — Order management (purchased APIs or sold orders)
+  F5  CHAT        — P2P order room messaging
+  F6  REPUTATION  — Trust score, XP, leaderboard
+  F7  ANALYTICS   — Usage charts and flow analysis
+
+The top bar shows: network status (Base Sepolia), a BUY/SELL mode toggle,
+reputation score, wallet connection, and the live clock.
+
+
+===========================================================
+PART 1: SELL MODE — SELLER USER JOURNEY
+===========================================================
+
+---------------------------------------------------------------------
+STEP S1: ENTER SELL MODE
+---------------------------------------------------------------------
+Starting state:
+  User opens the Tokenta Terminal in a browser.
+  The default mode is BUY.
+
+Action:
+  User clicks the "SELL" toggle in the top bar.
+
+What happens:
+  A "Role Transition Overlay" animation plays, showing the SELL mode
+  branding and transition cue.
+  The workspace switches to SELL mode across all panels.
+  The URL/session records SELL as the active mode.
+  Navigation auto-jumps to F1 MARKET.
+
+---------------------------------------------------------------------
+STEP S2: SELL ONBOARDING BANNER (first-time sellers only)
+---------------------------------------------------------------------
+Condition:
+  User has no existing listings AND has not dismissed the onboarding
+  banner before (tracked in localStorage).
+
+What the user sees:
+  A prominent banner at the top of the MARKET view with:
+  - "Start earning from your unused API quota"
+  - A 3-step overview: (1) List API, (2) Verify & Publish, (3) Receive Escrow
+  - Two buttons:
+      [START · LIST API FOR SALE]  (primary, white button)
+      [TAKE GUIDED SELLER TOUR]    (secondary, border button)
+  - An X button to permanently dismiss the banner.
+
+Button: "START · LIST API FOR SALE"
+  -> Proceeds to Step S3 (opens ListApiModal).
+
+Button: "TAKE GUIDED SELLER TOUR"
+  -> Opens the guided user tour in SELL track mode.
+  -> Spotlights each relevant UI element with step-by-step instructions.
+
+Button: X (dismiss)
+  -> Banner is permanently hidden for this browser session.
+  -> localStorage key "tokenta-sell-onboard-dismissed" is set to "1".
+
+---------------------------------------------------------------------
+STEP S3: F1 MARKET — SELL TAB (existing sellers)
+---------------------------------------------------------------------
+Returning sellers (or after dismissing the banner) see:
+  F1 MARKET in SELL mode has two sub-tabs:
+    [LIST ON MARKETPLACE]     [SELL TO TOKENTA]
+
+Sub-tab: LIST ON MARKETPLACE (default)
+  Shows:
+  - A "P2P LISTING · CREATE" section with description and a "CREATE
+    LISTING" button.
+  - A table of the seller's existing P2P listings (if any) showing
+    asset, quantity, price, date listed, and status.
+
+Button: "CREATE LISTING" (or the sidebar "List API" shortcut)
+  -> Proceeds to Step S4 (opens ListApiModal overlay).
+
+Sub-tab: SELL TO TOKENTA
+  Shows:
+  - Tokenta Buyback Program offers (preset prices, instant liquidity).
+  - Each offer shows provider, price, model, and an "ACCEPT BUYBACK" button.
+  - A table of pending Tokenta sales.
+  Note: Buyback requires a 200% seller deposit and key rotation.
+
+Button: "ACCEPT BUYBACK" on an offer card
+  -> Opens BuybackVerifyModal (separate flow, see Step S-BB below).
+
+---------------------------------------------------------------------
+STEP S4: LIST API MODAL (SL.1)
+---------------------------------------------------------------------
+What the user sees:
+  A modal overlay titled "List API for Sale" with code SL.1.
+  Fields:
+    - AI Provider selector (DeepSeek, OpenAI, Anthropic, Google, custom)
+    - API Key field (password-masked, paste support)
+    - Quota to Sell (number, in tokens)
+    - Ask Price (USDC per million tokens, e.g. "0.002")
+    - Verification Notice: explains token burn (~25-75 tokens typical,
+      ceiling up to 3% of declared quota)
+    - Checkbox: "I authorize Tokenta controlled sampling" (required)
+    - Checkbox: "Auto-publish after verification passes" (optional,
+      default OFF — seller must manually confirm)
+    - Submit button: "LIST API · START VERIFY"
+
+Validation:
+  Submit button is disabled unless:
+    - API key is at least 8 characters.
+    - Consent checkbox is checked.
+    - For openai-compatible/custom: base URL is filled in.
+
+Action: click "LIST API · START VERIFY"
+  System calls:
+    POST /api/v1/terminal/listings/run
+    Creates a listing record (status: VERIFYING) and starts a
+    verification job.
+  
+  After submission:
+    - Modal closes.
+    - Active listing ID and job ID are stored in app state.
+    - App auto-navigates to F2 VERIFY workspace.
+    - VerificationProgressModal overlay opens automatically.
+  -> Proceeds to Step S5.
+
+---------------------------------------------------------------------
+STEP S5: VERIFICATION PROGRESS MODAL (VF.0)
+---------------------------------------------------------------------
+What the user sees:
+  A full-screen overlay showing real-time verification status.
+  Components:
+    - Asset/outcome header: shows listing label and current outcome
+      (empty while running, then PASS / FAIL / DEGRADED / REVIEW).
+    - Progress bar with percentage.
+    - Pipeline step grid (5 stages):
+        L1 CONNECTIVITY  — checks the API key is reachable
+        L2 QUOTA         — probabilistic quota estimation
+        L3 RATE_LIMIT    — rate limit detection
+        L5 RISK_ANALYSIS — fraud/TOS risk scoring
+        FINALIZE         — proof generation and anchoring
+    - Proof metrics (token burn, capability score, capacity band)
+      once pipeline completes.
+    - Live event log (timestamped events streamed from the server).
+    - Footer: "HIDE · VIEW IN F2" button (hides modal, job keeps running).
+
+While running:
+  Steps pulse with animation as they execute.
+  User can click "HIDE · VIEW IN F2" to close the modal and monitor
+  progress in the F2 VERIFY workspace instead.
+
+Outcome: FAIL
+  - The outcome header shows "FAIL" in red.
+  - A failure detail box shows the error code and message.
+  - No publish option is shown.
+  - User can click "CLOSE" to dismiss.
+  - The listing status is set to FAILED and is not visible to buyers.
+
+Outcome: DEGRADED or REVIEW
+  - Shown in amber/yellow.
+  - A note explains the listing has limited capacity or needs review.
+  - No publish option for DEGRADED; REVIEW may still proceed.
+  - Listing is not visible to buyers.
+
+Outcome: PASS
+  - Outcome header shows "PASS" in white.
+  - Proof metrics section appears (capability score, capacity band).
+  - "STEP 2 OF 2 · CONFIRM LISTING" section appears:
+      Shows listing preview: Provider, Quota to Sell, Ask Price,
+      Capability %, Capacity Band.
+      Shows "Estimated gross revenue" (quota x ask price).
+      Shows note about escrow protection.
+      Button: "CONFIRM & PUBLISH TO MARKETPLACE"
+  -> Proceeds to Step S6.
+
+Button: "CONFIRM & PUBLISH TO MARKETPLACE"
+  System calls:
+    POST /api/v1/terminal/listings/:id/publish
+    Listing status changes from VERIFIED_PENDING_PUBLISH to LIVE.
+  
+  What happens:
+    - Modal shows "LISTING IS LIVE" success state.
+    - Two buttons appear:
+        [VIEW IN MARKETPLACE]     (primary)
+        [GUIDE TOUR · SELLER JOURNEY]  (secondary)
+  -> Proceeds to Step S7.
+
+---------------------------------------------------------------------
+STEP S6 (ALTERNATIVE): AUTO-PUBLISH PATH
+---------------------------------------------------------------------
+If the seller checked "Auto-publish after verification passes" in Step S4:
+  After PASS, the listing is automatically published to LIVE status.
+  The modal will still show the PASS outcome and proof metrics.
+  The "CONFIRM & PUBLISH" section is skipped.
+  The "LISTING IS LIVE" success state appears immediately.
+
+---------------------------------------------------------------------
+STEP S7: LISTING IS LIVE — POST-PUBLISH SUCCESS
+---------------------------------------------------------------------
+What the user sees:
+  Inside VerificationProgressModal, "LISTING IS LIVE" success state:
+  - Checkmark icon.
+  - "Your API is now visible on the marketplace."
+  - [VIEW IN MARKETPLACE] button
+  - [GUIDE TOUR · SELLER JOURNEY] button
+
+Button: "VIEW IN MARKETPLACE"
+  - Modal closes.
+  - System computes estimated revenue from the listing snapshot.
+  - SellJourneyCongratsModal opens (see Step S8).
+
+Button: "GUIDE TOUR · SELLER JOURNEY"
+  - Modal closes.
+  - The guided seller tour starts from the beginning.
+
+---------------------------------------------------------------------
+STEP S8: CONGRATULATIONS MODAL (SJ.0)
+---------------------------------------------------------------------
+What the user sees:
+  Full-screen congratulations modal:
+  - Large checkmark icon with pulsing animation.
+  - "CONGRATULATIONS" heading.
+  - Confirmation that the API is now live.
+  - Listing summary: listing ID, estimated revenue USDC.
+  - "WHAT HAPPENS NEXT" checklist (4 steps):
+      1. Buyers can discover your listing
+      2. Tokenta escrows buyer payments
+      3. Buyer confirms the API works
+      4. Funds released to seller (minus 3% fee)
+  - Buttons:
+      [VIEW MY SALES IN ORDERS]   -> navigates to F4 ORDERS
+      [SEE LISTING IN MARKET]     -> navigates to F1 MARKET
+      [REPLAY SELLER TOUR]        -> starts seller tour again
+
+Button: "VIEW MY SALES IN ORDERS"
+  -> Closes modal, navigates to F4 ORDERS in SELL mode.
+  -> Proceeds to Step S10 (once a buyer purchases).
+
+---------------------------------------------------------------------
+STEP S9: MANAGING LISTING PRICE (F2 VERIFY or F1 MARKET)
+---------------------------------------------------------------------
+Once the listing is LIVE, the seller can update its ask price.
+
+Location: F2 VERIFY workspace, lower-left panel "MY LISTINGS"
+  Each listing row shows:
+  - Listing ID, provider name, status.
+  - Price per token with a pencil icon.
+  - Estimated income after 3% fee.
+  - "Listed · buyers can purchase" note for LIVE listings.
+
+Action: click the pencil icon next to the price.
+  -> An inline editor appears with a number input.
+  -> User types a new price (USDC per million tokens).
+  -> Press Enter or click the checkmark button to save.
+  -> System calls PATCH /api/v1/terminal/listings/:id/price
+  -> Price updates immediately in the UI.
+  -> The new price takes effect for future orders.
+
+Button: cancel (X icon)
+  -> Discards the edit, price remains unchanged.
+
+---------------------------------------------------------------------
+STEP S10: ORDER ARRIVES — SELL MODE F4 ORDERS
+---------------------------------------------------------------------
+When a buyer purchases the seller's listing:
+  A new order is created with status PENDING_ESCROW.
+  The seller can see it in F4 ORDERS.
+
+F4 ORDERS — SELL MODE ("MY SALES" view):
+  Shows a prominent header with:
+    - "MY SALES" title and subtitle.
+    - Stat tiles: ACTIVE SALES, NEEDS ACTION (highlighted if > 0),
+      COMPLETED.
+  Order table columns: ORDER ID, API LISTING, QTY, VALUE, ESCROW,
+  STATUS, BUYER, ACTION.
+
+Order lifecycle in SELL mode:
+  1. PENDING_ESCROW — Buyer has created the order, not yet paid.
+     Escrow status: PENDING.
+  2. ESCROW_FUNDED  — Buyer has locked payment in escrow.
+     Escrow status: FUNDED.
+     Seller sees "AWAITING BUYER CONFIRMATION" in F3 ESCROW.
+  3. SETTLED        — Buyer has confirmed API works, escrow released.
+     Escrow status: RELEASED.
+     Seller receives gross amount minus 3% Tokenta fee.
+
+---------------------------------------------------------------------
+STEP S11: ESCROW SETTLED — RECEIVING PAYMENT (F3 ESCROW / F6 WALLET)
+---------------------------------------------------------------------
+After buyer confirms receipt (Step B9):
+  Seller's F3 ESCROW view shows:
+    - "PAYMENT RELEASED · CHECK WALLET"
+    - Order shows escrow status RELEASED.
+    - Order room (F5 CHAT) shows system message:
+      "Escrow released: X USDC. Seller credited Y USDC; 3% fee
+       (Z USDC) -> Tokenta treasury."
+
+F6 WALLET (SELL mode):
+  - Settlement Stream shows a new INCOME entry: +Y USDC.
+  - USDC available balance increases by net amount (gross x 0.97).
+  - "SALE INCOME" panel shows updated available and lifetime totals.
+  - "Tokenta Treasury" panel shows fee receipt.
+
+To withdraw earnings:
+  In F3 ESCROW, the right panel "Quick Withdraw" appears.
+  User enters an amount and clicks "WITHDRAW TO WALLET".
+  System calls POST /wallet/withdraw.
+  Settlement stream shows a WITHDRAW entry.
+
+---------------------------------------------------------------------
+SELL MODE — TOKENTA BUYBACK ALTERNATIVE PATH (S-BB)
+---------------------------------------------------------------------
+Instead of listing on the P2P marketplace, the seller can sell
+directly to Tokenta at a fixed price.
+
+S-BB1: In F1 MARKET → SELL TO TOKENTA tab, user clicks "ACCEPT BUYBACK"
+       on an offer card.
+S-BB2: BuybackVerifyModal opens. Provider is locked to the offer's
+       provider. User pastes their API key.
+S-BB3: Verification runs (same L1-L5 pipeline).
+S-BB4: On PASS, user clicks "CONFIRM BUYBACK".
+       System calls POST /buyback/confirm.
+       An order ID and escrow ID are generated.
+S-BB5: Tokenta processes the buyback. Deposit requirement is 200% held
+       for 30 days. Payment arrives within 1 hour after verification.
+
+
+===========================================================
+PART 2: BUY MODE — BUYER USER JOURNEY
+===========================================================
+
+---------------------------------------------------------------------
+STEP B1: ENTER BUY MODE
+---------------------------------------------------------------------
+Starting state:
+  User opens the Tokenta Terminal.
+  Default mode is BUY.
+
+What the user sees:
+  F1 MARKET workspace in BUY mode.
+  A horizontal source tab bar:
+    [ALL LISTINGS]  [USER MARKETPLACE]  [TOKENTA DIRECT]
+  A "BUY VERIFIED API" button in the top-right of the workspace.
+  A left-side filter sidebar.
+  A table of live API listings.
+
+---------------------------------------------------------------------
+STEP B2: F1 MARKET — BROWSE LISTINGS
+---------------------------------------------------------------------
+Left sidebar — Filters (scrollable independently):
+  Checkboxes:
+    P2P Listings Only
+    Platform Inventory Only
+    Tokenta Buyback Offers
+    Direct Key Access Only
+    Verified TOS Compliance
+    Aggregated Inventory
+  Sort selector:
+    Price (low to high), Price (high to low), Trust Score,
+    Verify Freshness, Inventory Size, Access Method
+
+Listing table columns:
+  SELLER, PROVIDER, QTY, PRICE, ACCESS, VERIFY, TRUST, (action)
+
+Each row shows:
+  - Seller wallet (truncated), provider name.
+  - Available quota (supply tokens).
+  - Ask price in USDC.
+  - Access method badge (Direct Key / Proxy).
+  - Verification freshness (how recently verified).
+  - Trust cell (risk tier label).
+
+Action: click on a listing row
+  -> Row is highlighted as selected.
+  -> Asset becomes the "active" selection for the buy modal.
+
+Action: click "BUY VERIFIED API" button (top bar) or click a row then
+        the buy action
+  -> BuyApiModal opens (Step B3).
+
+---------------------------------------------------------------------
+STEP B3: BUY API MODAL (BY.1)
+---------------------------------------------------------------------
+What the user sees:
+  Modal titled "Buy Verified API" (code BY.1).
+  Top grid: Asset ticker, type, verification status, uptime.
+  Wallet status bar: shows connected wallet or "WALLET NOT CONNECTED".
+  P2P Escrow Flow diagram (4 steps, informational):
+    1. Lock payment — your funds held by Tokenta escrow
+    2. Receive API access — credentials provisioned to you
+    3. Confirm it works — verify the API is functional
+    4. Funds released — Tokenta releases escrow to seller
+  Purchase mode toggle:
+    [FULL BUYOUT]      [PARTIAL QUOTA]
+  If PARTIAL: quantity input field appears.
+  Price breakdown:
+    - EST. TOTAL (YOU PAY): X USDC
+    - SELLER RECEIVES (AFTER 3% FEE): Y USDC
+    - Note: "TOKENTA PLATFORM FEE: 3% · CHARGED TO SELLER ONLY"
+  Button: "BUY VERIFIED API · LOCK ESCROW"
+
+Button toggle: "FULL BUYOUT"
+  -> Calculates total = (askPriceUsdc x quotaToSell) / 1,000,000.
+  -> Minimum 0.01 USDC.
+
+Button toggle: "PARTIAL QUOTA"
+  -> User enters a token quantity.
+  -> Total = (askPriceUsdc x quantity) / 1,000,000.
+
+Button: "BUY VERIFIED API · LOCK ESCROW"
+  Requires wallet connection.
+  System calls:
+    POST /api/v1/terminal/orders/purchase
+    Creates order with status PENDING_ESCROW.
+  
+  After submission:
+    - Modal closes.
+    - Order ID is stored in app state.
+    - App navigates to F3 ESCROW workspace.
+  -> Proceeds to Step B4.
+
+---------------------------------------------------------------------
+STEP B4: F3 ESCROW — STEP 1: LOCK PAYMENT
+---------------------------------------------------------------------
+What the user sees:
+  F3 ESCROW workspace.
+  Top section: "F3 · ESCROW STATUS · BASE SEPOLIA"
+  P2P Order Flow progress indicator (4 steps, current step highlighted).
+  Deposit breakdown panel showing:
+    - Transaction total, buyer payment, seller deposit, platform fee,
+      platform reserve.
+  Wallet summary (USDC available and escrowed amounts).
+  Fee breakdown:
+    "You pay: X USDC · Tokenta fee: Y USDC (3%) · Seller receives: Z USDC"
+  Order detail box:
+    - Order ID, value, escrow status.
+  Action button (pulsing attention ring):
+    "STEP 1 · LOCK PAYMENT IN ESCROW"
+
+Button: "STEP 1 · LOCK PAYMENT IN ESCROW"
+  System calls:
+    POST /api/v1/terminal/sign/escrow  (gets HMAC signature)
+    POST /api/v1/terminal/orders/:id/escrow/fund
+  
+  Fund escrow effects:
+    - Buyer's USDC balance is immediately debited by the order amount.
+      (The ledger deducts funds the moment escrow is locked.)
+    - Escrow record status changes from PENDING to FUNDED.
+    - Order status changes from PENDING_ESCROW to ESCROW_FUNDED.
+    - Order room system message: "Escrow funded: X USDC. Payment locked."
+  
+  If buyer has insufficient balance:
+    - Returns HTTP 402 with message "Insufficient USDC balance."
+    - Error is shown in the escrow view.
+    - User must deposit more USDC first (see Step B-W below).
+  
+  After success:
+    - The page refreshes to show FUNDED state.
+    - Step 2 progress indicator becomes active.
+    - The "LOCK" button is replaced by the Step 3 confirmation button.
+  -> Proceeds to Step B5.
+
+---------------------------------------------------------------------
+STEP B5: STEP 2 — RECEIVE API ACCESS (AWAITING PROVISIONING)
+---------------------------------------------------------------------
+After escrow is funded, the buyer waits for the seller to provision
+access. This step is currently informational.
+
+What the user sees:
+  - Order flow step 2 is active/pulsing.
+  - Order status shows ESCROW_FUNDED.
+  - No action button required from buyer at this stage.
+  - Buyer may visit F5 CHAT to communicate with the seller.
+
+In F5 CHAT (Order Room):
+  - System messages show escrow status updates.
+  - Buyer can send messages to the seller.
+  - Available actions: Run Re-Verify, Escalate Dispute, Attach
+    Attestation, Accept Delivery.
+
+---------------------------------------------------------------------
+STEP B6: STEP 3 — CONFIRM RECEIPT AND RELEASE PAYMENT
+---------------------------------------------------------------------
+After the buyer tests the API and confirms it is working:
+
+What the user sees in F3 ESCROW:
+  - Step 3 is highlighted in the P2P flow.
+  - Action button (pulsing ring):
+    "STEP 3 · CONFIRM RECEIPT · RELEASE PAYMENT"
+
+Button: "STEP 3 · CONFIRM RECEIPT · RELEASE PAYMENT"
+  System calls:
+    POST /api/v1/terminal/sign/escrow  (release signature)
+    POST /api/v1/terminal/orders/:id/escrow/release
+  
+  Release effects:
+    - Escrow record status changes from FUNDED to RELEASED.
+    - Order status changes from ESCROW_FUNDED to SETTLED.
+    - Seller's ledger is credited: gross amount minus 3% platform fee.
+    - Tokenta treasury receives 3% fee in real-time.
+    - Payout transaction hash is generated.
+    - Order room system message: "Escrow released: X USDC. Seller
+      credited Y USDC; 3% fee (Z USDC) -> Tokenta treasury."
+  
+  After success:
+    - "PAYMENT RELEASED · CHECK WALLET" status shown (for SELL mode).
+    - Payout message displayed in green: seller's net amount and tx hash.
+    - Step 4 in flow indicator becomes complete.
+  -> Proceeds to Step B7.
+
+---------------------------------------------------------------------
+STEP B7: F4 ORDERS — MANAGE PURCHASES
+---------------------------------------------------------------------
+The buyer can view all their purchases in F4 ORDERS.
+
+F4 ORDERS — BUY MODE ("MY PURCHASES" view):
+  Prominent header:
+    - "MY PURCHASES" title.
+    - Subtitle: "APIs you have purchased or are paying for."
+    - Stat tiles: ACTIVE PURCHASES, NEEDS ACTION, COMPLETED.
+
+  Order table columns: ORDER ID, API LISTING, QTY, VALUE, ESCROW,
+  STATUS, SELLER, ACTION.
+  
+  Rows needing action show an "ACT NOW" pill.
+
+Action: click on an order row
+  -> Navigates to Order Detail View for that order.
+  -> Shows full order details, escrow state, verification trail,
+     and available actions.
+
+Order Detail View actions (depending on order state):
+  - "OPEN ORDER ROOM" -> navigates to F5 CHAT for this order.
+  - "OPEN ESCROW" -> navigates to F3 ESCROW for this order.
+  - "REQUEST PRE-PURCHASE VERIFY" -> triggers a new verification job
+    for the purchased API (optional, for spot-checking).
+  - "ESCALATE DISPUTE" -> fraud monitoring triggered.
+  - "ACCEPT DELIVERY" -> marks delivery as accepted.
+
+---------------------------------------------------------------------
+STEP B-W: WALLET — DEPOSIT USDC (F3 ESCROW SIDE PANEL)
+---------------------------------------------------------------------
+If the buyer needs to add funds before locking escrow:
+
+Location: F3 ESCROW workspace, right side panel.
+  Buyer clicks "DEPOSIT USDC".
+  Enter amount and click the deposit button.
+  System calls: POST /wallet/deposit
+  Available USDC balance increases immediately.
+  Settlement stream shows DEPOSIT entry.
+
+Note: New wallets are seeded with 10,000 USDC automatically for demo
+      purposes, so the initial escrow fund should work without a
+      separate deposit step in most cases.
+
+---------------------------------------------------------------------
+STEP B8: REPUTATION — F6
+---------------------------------------------------------------------
+Both buyer and seller can visit F6 REPUTATION at any time.
+
+What the user sees:
+  Left column (scrollable independently):
+    - ReputationLevelCard:
+        Level badge (e.g. "LV 1 · NEWCOMER")
+        XP progress bar toward next level
+        Milestone checklist (earned and pending)
+        "VIEW LEADERBOARD" button
+    - Trust Vector panel:
+        Composite score (large number)
+        Confidence indicator
+        Factor bars (if verified)
+  
+  Right column (scrollable independently):
+    - Reputation Ledger: append-only log of reputation events.
+
+XP system:
+  Level 1 Newcomer    0 XP
+  Level 2 Contributor 300 XP
+  Level 3 Verified Trader 800 XP
+  Level 4 Trusted Partner 2000 XP
+  Level 5 Elite Seller 5000 XP
+
+XP is earned from:
+  - Verified runs: +120 XP each
+  - Anchored receipts: +60 XP each
+  - Composite score: score x 5 XP
+  - Milestones (first verification, first listing, first sale, etc.)
+
+Button: "VIEW LEADERBOARD" (or click reputation score in top bar)
+  -> Opens ReputationLeaderboardModal.
+  Two tabs:
+    LEADERBOARD — ranked table of top sellers by XP. Your row is
+                  highlighted.
+    MY PROGRESS — XP breakdown by source, level progress bar,
+                  milestone checklist with XP rewards shown.
+
+
+===========================================================
+PART 3: FEE AND PAYMENT MECHANICS SUMMARY
+===========================================================
+
+Platform fee: 3% (charged to sellers only, not buyers)
+
+How fees flow:
+  1. Buyer pays full listing price when funding escrow.
+     (Buyer's wallet balance is debited immediately.)
+  2. Funds sit in Tokenta escrow (FUNDED state).
+     (Neither buyer nor seller can access the funds.)
+  3. Buyer confirms receipt; escrow is released.
+  4. Seller receives: gross amount x 0.97 (97%).
+     Tokenta treasury receives: gross amount x 0.03 (3%).
+  5. Both credits happen simultaneously in real-time.
+
+Treasury balance is visible in F6 WALLET under "Tokenta Treasury"
+panel (F6.5):
+  - Treasury wallet address
+  - Current USDC balance
+  - Lifetime fees collected
+  - Recent fee receipt log (timestamp, order ID, amount)
+
+Seller income (available in F6 WALLET right panel):
+  - Available USDC (ready to withdraw)
+  - Lifetime earned USDC (net of all fees)
+  - Sale count
+
+Buyer balance:
+  - Starts at 10,000 USDC for new wallets (seeded for demo).
+  - Decreases when escrow is funded.
+  - Can be topped up via F6 WALLET → Quick Deposit.
+
+
+===========================================================
+PART 4: TOUR AND ONBOARDING
+===========================================================
+
+User Tour button (bottom of left sidebar):
+  Opens TourMenuModal with options:
+    - Full Platform Tour (all workspaces, F1-F7)
+    - Seller Journey Tour (SELL-specific steps)
+    - Buyer Journey Tour (BUY-specific steps)
+    - Individual Workspace Tours (F1 through F7 individually)
+
+Tour behavior:
+  - Spotlights the relevant DOM element with a dim overlay.
+  - Shows step text, next/previous navigation, and a skip button.
+  - Progress is tracked in localStorage (TOUR_STORAGE_KEY).
+  - The tour button shows "REPLAY TOUR" after completion.
+  - The seller tour can also be launched from the Congrats modal
+    (Step S8) or from the VerificationProgressModal success state.
+
+
+===========================================================
+PART 5: KEY SYSTEM STATES AND STATUS CODES
+===========================================================
+
+Listing status codes:
+  VERIFYING               — Verification job running.
+  VERIFIED_PENDING_PUBLISH — Passed verification; seller must confirm.
+  LIVE                    — Active on marketplace, visible to buyers.
+  REVIEW                  — Passed with limited capacity; under review.
+  DEGRADED                — Capacity insufficient for listing.
+  FAILED                  — Verification failed; not listed.
+
+Order status codes:
+  PENDING_ESCROW  — Order created, buyer has not funded escrow.
+  ESCROW_FUNDED   — Buyer's payment is locked in escrow.
+  SETTLED         — Buyer confirmed, escrow released, seller paid.
+
+Escrow status codes:
+  PENDING   — No funds locked yet.
+  FUNDED    — Buyer's USDC is locked.
+  RELEASED  — Funds have been distributed (seller + treasury).
+
+Verification pipeline stages:
+  L1 CONNECTIVITY  — API key is reachable and returns valid responses.
+  L2 QUOTA         — Probabilistic quota estimation via micro-probes.
+  L3 RATE_LIMIT    — Rate limit detection and capacity assessment.
+  L5 RISK_ANALYSIS — Fraud risk, TOS compliance, and gray market flags.
+  FINALIZE         — Proof hash generation; optional on-chain anchor.
+
+Verification outcomes:
+  PASS     — API is live, quota sufficient, low risk. Listing can go LIVE.
+  FAIL     — API is unreachable, invalid key, or high risk. Not listed.
+  DEGRADED — API works but quota is too low for meaningful listing.
+  REVIEW   — Ambiguous result; manual review may be required.

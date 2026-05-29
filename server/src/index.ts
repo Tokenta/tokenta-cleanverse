@@ -1,3 +1,5 @@
+import "./config/load-env.js";
+import "./config/network.js";
 import { serve } from "@hono/node-server";
 import app from "./api/server.js";
 import { startLiveMonitorScheduler } from "./live-monitor/scheduler.js";

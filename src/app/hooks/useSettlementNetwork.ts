@@ -12,6 +12,12 @@ const FALLBACK: TerminalNetworkResponse = {
   blockNumber: null,
   gasPriceGwei: null,
   contractAddress: null,
+  escrowWallet: "0x4463c9f60c27ebF9A966f8cD55d54e08114afb9E",
+  treasuryWallet: "0x419fe9C2e707a4Ce3613c9945f9Dca03aeDD485d",
+  escrowWalletConfigured: true,
+  treasuryWalletConfigured: true,
+  escrowReleaseSignerConfigured: false,
+  escrowOperatorAddress: null,
 };
 
 export function useSettlementNetwork(pollMs = 15_000) {

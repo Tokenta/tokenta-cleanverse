@@ -1,4 +1,7 @@
 import { useState } from "react";
+import { useTerminalToast } from "../context/TerminalToastContext";
+import { TokentaScrollArea } from "./TokentaScrollArea";
+import { ReputationLevelCard } from "./ReputationLevelCard";
 import { ArrowDownRight, ArrowUpRight } from "lucide-react";
 import type {
   AccessMethod,
@@ -150,36 +153,43 @@ export function MarketFilterSidebar({
   ];
 
   return (
-    <aside className="w-44 shrink-0 border-r border-white/15 p-3 text-[10px] tracking-[0.14em]">
-      <div className="text-white/40 mb-2">FILTERS</div>
-      <div className="space-y-2">
-        {checks
-          .filter((c) => !c.hide)
-          .map((c) => (
-            <label key={c.key} className="flex cursor-pointer items-start gap-2 hover:text-white">
-              <input
-                type="checkbox"
-                checked={filters[c.key]}
-                onChange={() => toggle(c.key)}
-                className="mt-0.5 accent-white"
-              />
-              <span className="leading-snug text-white/70">{c.label}</span>
-            </label>
-          ))}
-      </div>
-      <div className="text-white/40 mt-4 mb-2">SORT</div>
-      <select
-        value={sort}
-        onChange={(e) => onSortChange(e.target.value as MarketSortKey)}
-        className="w-full border border-white/20 bg-black px-2 py-1.5 text-[10px] outline-none focus:border-white"
+    <aside className="flex w-40 shrink-0 flex-col border-r border-white/15 min-h-0">
+      <TokentaScrollArea
+        orientation="vertical"
+        className="min-h-0 flex-1"
+        viewportClassName="p-2.5 text-[9px] tracking-[0.14em]"
+        ariaLabel="Market filters"
       >
-        <option value="PRICE_ASC">Price (low to high)</option>
-        <option value="PRICE_DESC">Price (high to low)</option>
-        <option value="TRUST">Trust Score</option>
-        <option value="VERIFY_FRESH">Verification Freshness</option>
-        <option value="INVENTORY_SIZE">Inventory Size</option>
-        <option value="ACCESS_METHOD">Access Method</option>
-      </select>
+        <div className="text-white/40 mb-1.5">FILTERS</div>
+        <div className="space-y-1.5">
+          {checks
+            .filter((c) => !c.hide)
+            .map((c) => (
+              <label key={c.key} className="flex cursor-pointer items-start gap-1.5 hover:text-white">
+                <input
+                  type="checkbox"
+                  checked={filters[c.key]}
+                  onChange={() => toggle(c.key)}
+                  className="mt-0.5 shrink-0 accent-white"
+                />
+                <span className="leading-snug text-white/60">{c.label}</span>
+              </label>
+            ))}
+        </div>
+        <div className="text-white/40 mt-3 mb-1.5">SORT</div>
+        <select
+          value={sort}
+          onChange={(e) => onSortChange(e.target.value as MarketSortKey)}
+          className="w-full border border-white/20 bg-black px-1.5 py-1 text-[9px] outline-none focus:border-white"
+        >
+          <option value="PRICE_ASC">Price (low to high)</option>
+          <option value="PRICE_DESC">Price (high to low)</option>
+          <option value="TRUST">Trust Score</option>
+          <option value="VERIFY_FRESH">Verify Freshness</option>
+          <option value="INVENTORY_SIZE">Inventory Size</option>
+          <option value="ACCESS_METHOD">Access Method</option>
+        </select>
+      </TokentaScrollArea>
     </aside>
   );
 }
@@ -290,8 +300,8 @@ export function KeyRotationPanel({
 }) {
   const [oldKey, setOldKey] = useState("");
   const [newKey, setNewKey] = useState("");
-  const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const { showToast } = useTerminalToast();
 
   if (role === "buyer") {
     return (
@@ -306,7 +316,6 @@ export function KeyRotationPanel({
   const submit = async () => {
     if (!orderId || newKey.length < 8 || oldKey.length < 8) return;
     setBusy(true);
-    setError(null);
     try {
       const { createKeyRotationVerification } = await import("../api/verification");
       const res = await createKeyRotationVerification({
@@ -320,7 +329,10 @@ export function KeyRotationPanel({
       setNewKey("");
       setOldKey("");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Rotation verify failed");
+      showToast({
+        message: e instanceof Error ? e.message : "Rotation verify failed",
+        title: "KEY ROTATION",
+      });
     } finally {
       setBusy(false);
     }
@@ -346,7 +358,6 @@ export function KeyRotationPanel({
         placeholder="new key"
         className="w-full border border-white/20 bg-black px-2 py-2 text-[11px] outline-none focus:border-white"
       />
-      {error && <p className="text-[10px] text-red-400">{error}</p>}
       <button
         type="button"
         disabled={busy || !orderId}
@@ -367,6 +378,10 @@ export function TrustLayerStatusPanel({
   anchoredReceipts,
   nextMilestone,
   live,
+  onOpenLeaderboard,
+  composite,
+  hasActiveListing,
+  completedOrders,
 }: {
   status?: string;
   tier?: string;
@@ -375,14 +390,34 @@ export function TrustLayerStatusPanel({
   anchoredReceipts?: number;
   nextMilestone?: string;
   live?: boolean;
+  onOpenLeaderboard?: () => void;
+  composite?: number | null;
+  hasActiveListing?: boolean;
+  completedOrders?: number;
 }) {
+  if (onOpenLeaderboard) {
+    return (
+      <ReputationLevelCard
+        xpInput={{
+          verifiedRuns: verifiedRuns ?? 0,
+          anchoredReceipts: anchoredReceipts ?? 0,
+          composite: composite ?? null,
+          hasActiveListing,
+          completedOrders,
+        }}
+        live={live ?? false}
+        onOpenLeaderboard={onOpenLeaderboard}
+      />
+    );
+  }
+
   const isUnverified = (status ?? "UNVERIFIED") === "UNVERIFIED";
 
   return (
     <div className="border border-white/15 p-4 text-[11px] space-y-4">
       <div className="flex items-center justify-between text-[10px] tracking-[0.22em] text-white/40">
         <span>TOKENTA TRUST LAYER</span>
-        <span>{live ? "API" : "MOCK"}</span>
+        <span>{live ? "API" : "—"}</span>
       </div>
       <div>
         <div className="text-[9px] tracking-[0.18em] text-white/40">STATUS</div>
@@ -433,7 +468,7 @@ export function ComplianceScorePanel({
     <div className="border border-white/15 p-4 text-[11px]">
       <div className="flex items-center justify-between text-[10px] tracking-[0.22em] text-white/40">
         <span>YOUR COMPLIANCE SCORE</span>
-        <span>{live ? "API" : "MOCK"}</span>
+        <span>{live ? "API" : "—"}</span>
       </div>
       <div className="text-[32px] tabular-nums mt-1">
         {displayScore}

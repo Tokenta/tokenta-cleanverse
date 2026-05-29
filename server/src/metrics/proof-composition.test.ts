@@ -56,10 +56,11 @@ describe("proof-composition", () => {
     const r = computeProofComposition([
       jobWithParadigms(["A", "C", "L5", "F"]),
     ]);
+    expect(r.connectivityPct).toBe(25);
     expect(r.zkProofPct).toBe(25);
-    expect(r.teeAttestPct).toBe(25);
+    expect(r.teeAttestPct).toBe(0);
     expect(r.quotaChkPct).toBe(25);
     expect(r.signaturePct).toBe(25);
-    expect(r.rows).toHaveLength(4);
+    expect(r.rows).toHaveLength(5);
   });
 });

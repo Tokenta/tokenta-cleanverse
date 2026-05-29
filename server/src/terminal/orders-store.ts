@@ -3,6 +3,7 @@
 export interface TerminalOrderRecord {
   orderId: string;
   listingId: string;
+  sellerWallet: string | null;
   buyerWallet: string | null;
   mode: "BUYOUT" | "PARTIAL";
   quantity: number;
@@ -15,6 +16,7 @@ const orders = new Map<string, TerminalOrderRecord>();
 
 export function createTerminalOrder(input: {
   listingId: string;
+  sellerWallet: string | null;
   buyerWallet: string | null;
   mode: "BUYOUT" | "PARTIAL";
   quantity: number;
@@ -24,6 +26,7 @@ export function createTerminalOrder(input: {
   const record: TerminalOrderRecord = {
     orderId,
     listingId: input.listingId,
+    sellerWallet: input.sellerWallet,
     buyerWallet: input.buyerWallet,
     mode: input.mode,
     quantity: input.quantity,
@@ -49,8 +52,23 @@ export function updateTerminalOrderStatus(
   return existing;
 }
 
-export function listTerminalOrders(limit = 100): TerminalOrderRecord[] {
-  return [...orders.values()]
+export function listTerminalOrders(
+  limit = 100,
+  filter?: { wallet?: string; role?: "buyer" | "seller" | "all" },
+): TerminalOrderRecord[] {
+  let rows = [...orders.values()];
+  const wallet = filter?.wallet?.toLowerCase();
+  const role = filter?.role ?? "all";
+  if (wallet) {
+    rows = rows.filter((o) => {
+      if (role === "buyer") return o.buyerWallet?.toLowerCase() === wallet;
+      if (role === "seller") return o.sellerWallet?.toLowerCase() === wallet;
+      return (
+        o.buyerWallet?.toLowerCase() === wallet || o.sellerWallet?.toLowerCase() === wallet
+      );
+    });
+  }
+  return rows
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .slice(0, Math.max(1, Math.min(limit, 500)));
 }

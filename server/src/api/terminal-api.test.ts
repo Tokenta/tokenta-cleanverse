@@ -6,6 +6,7 @@ import { resetTerminalSessionsForTest } from "../terminal/session-store.js";
 import { resetTerminalOrdersForTest } from "../terminal/orders-store.js";
 import { resetOrderRoomForTest } from "../terminal/order-room-store.js";
 import { resetAnchorsForTest } from "../verification/proof-anchor.js";
+import { resetSellerWalletLedgerForTest } from "../terminal/seller-wallet-ledger.js";
 import { pollJobUntilTerminal } from "../test/helpers.js";
 
 const MOCK_KEY = "sk-mock-terminal-api-layer";
@@ -18,6 +19,7 @@ describe("terminal API", () => {
     resetTerminalOrdersForTest();
     resetOrderRoomForTest();
     resetAnchorsForTest();
+    resetSellerWalletLedgerForTest();
   });
 
   it("GET /terminal/health and openapi", async () => {
@@ -148,6 +150,69 @@ describe("terminal API", () => {
     expect(byWallet.status).toBe(200);
     const wbody = (await byWallet.json()) as { orders: { buyerWallet: string | null }[] };
     expect(wbody.orders.every((o) => o.buyerWallet === "0xbuyer")).toBe(true);
+  });
+
+  it("seller receives wallet income when escrow is released", async () => {
+    const seller = "0xSeller1111111111111111111111111111111111";
+    const buyer = "0xBuyer2222222222222222222222222222222222";
+
+    const listingRes = await app.request("/api/v1/terminal/listings/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Wallet-Address": seller },
+      body: JSON.stringify({
+        apiKey: MOCK_KEY,
+        quotaToSell: 1_000_000,
+        askPriceUsdc: 10,
+      }),
+    });
+    const { listingId } = (await listingRes.json()) as { listingId: string };
+
+    const purchase = await app.request("/api/v1/terminal/orders/purchase", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Wallet-Address": buyer },
+      body: JSON.stringify({ listingId, mode: "BUYOUT" }),
+    });
+    const { orderId, order } = (await purchase.json()) as {
+      orderId: string;
+      order: { amountUsdc: string; sellerWallet: string };
+    };
+    expect(order.sellerWallet?.toLowerCase()).toBe(seller.toLowerCase());
+
+    const signFund = await app.request("/api/v1/terminal/sign/escrow", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ orderId, amountUsdc: order.amountUsdc, action: "fund" }),
+    });
+    const { signature: fundSig } = (await signFund.json()) as { signature: string };
+    const fund = await app.request(`/api/v1/terminal/orders/${orderId}/escrow/fund`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ amountUsdc: order.amountUsdc, signature: fundSig }),
+    });
+    expect(fund.status).toBe(201);
+
+    const signRel = await app.request("/api/v1/terminal/sign/escrow", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ orderId, amountUsdc: order.amountUsdc, action: "release" }),
+    });
+    const { signature: relSig } = (await signRel.json()) as { signature: string };
+    const release = await app.request(`/api/v1/terminal/orders/${orderId}/escrow/release`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ amountUsdc: order.amountUsdc, signature: relSig }),
+    });
+    expect(release.status).toBe(200);
+    const relBody = (await release.json()) as { sellerPayout?: { netUsdc: string } };
+    expect(relBody.sellerPayout?.netUsdc).toBeTruthy();
+
+    const income = await app.request("/api/v1/terminal/wallet/income", {
+      headers: { "X-Wallet-Address": seller },
+    });
+    expect(income.status).toBe(200);
+    const inc = (await income.json()) as { availableUsdc: string; saleCount: number };
+    expect(Number(inc.availableUsdc)).toBeGreaterThan(0);
+    expect(inc.saleCount).toBe(1);
   });
 
   it("GET /terminal/network returns Base Sepolia config", async () => {

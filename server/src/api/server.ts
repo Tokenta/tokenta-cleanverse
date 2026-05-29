@@ -8,6 +8,7 @@ import { listingStore } from "../listings/store.js";
 import { keyFingerprint } from "../verification/fingerprint.js";
 import type { CreateVerificationJobRequest, ProviderKind } from "../types/verification.js";
 import { checkAbuseBeforeJob } from "../verification/abuse-guard.js";
+import { resolveVerificationProvider } from "../verification/providers/catalog.js";
 import { persistListingCreate } from "../db/repository.js";
 import { buybackStore } from "../buyback/store.js";
 import { listOrderVerification } from "../orders/verification-trail.js";
@@ -89,18 +90,7 @@ app.use("/api/v1/*", privyJwtMiddleware);
 app.use("/api/v1/*", walletAuthMiddleware);
 
 app.get("/health/db", async (c) => {
-  const { getPrisma } = await import("../db/prisma.js");
-  const prisma = getPrisma();
-  if (!prisma) {
-    return c.json({ ok: false, reason: "USE_DB_PERSISTENCE not enabled or DATABASE_URL missing" }, 503);
-  }
-  try {
-    await prisma.$queryRaw`SELECT 1`;
-    const jobs = await prisma.verificationJob.count();
-    return c.json({ ok: true, verificationJobs: jobs });
-  } catch (e) {
-    return c.json({ ok: false, error: e instanceof Error ? e.message : "db error" }, 503);
-  }
+  return c.json({ ok: true, mode: "in-memory", message: "Database persistence disabled" });
 });
 
 app.get("/api/v1/admin/audit-log", (c) => {
@@ -184,31 +174,29 @@ app.post("/api/v1/listings", async (c) => {
     return c.json({ error: abuse.message, code: abuse.code }, 429);
   }
 
-  const providerMap: Record<string, ProviderKind> = {
-    openai: "openai",
-    "openai-compatible": "openai",
-    anthropic: "anthropic",
-    google: "google",
-  };
-  const pk = body.providerKind ?? body.provider ?? "openai";
-  const provider = providerMap[pk.toLowerCase()] ?? "openai";
+  const resolved = resolveVerificationProvider(body.providerKind ?? body.provider, {
+    claimedModel: body.claimedModel,
+  });
 
   const jobRequest: CreateVerificationJobRequest = {
     context: "LISTING_DRAFT",
-    provider,
+    provider: resolved.kind,
+    providerSlug: resolved.listingProviderKind,
     apiKey: body.apiKey,
     declaredQuantity: Number(body.quotaToSell),
-    claimedModel: body.claimedModel ?? "gpt-4o-mini",
+    claimedModel: resolved.defaultModel,
     costLiability: body.platformSubsidized ? "PLATFORM_SUBSIDIZED" : "SELLER_PAID",
     askPriceUsdc: Number(body.askPriceUsdc),
     autoListAfterVerify: body.autoListAfterVerify ?? true,
     l1Only: body.platformSubsidized ? true : undefined,
+    compatibleBaseUrl: resolved.compatibleBaseUrl,
+    l1Strategy: resolved.l1Strategy,
   };
 
   const job = jobStore.create(jobRequest, { keyFingerprint: fp });
 
   const listing = listingStore.create({
-    providerKind: pk,
+    providerKind: resolved.listingProviderKind,
     quotaToSell: jobRequest.declaredQuantity,
     askPriceUsdc: Number(body.askPriceUsdc),
     keyFingerprint: fp,

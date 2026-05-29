@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Tokenta Verification API — Swagger</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css"/>
+  <style>
+    html { box-sizing: border-box; overflow-y: scroll; }
+    *, *:before, *:after { box-sizing: inherit; }
+    body { margin: 0; background: #0a0a0a; }
+    .topbar { display: none; }
+    .swagger-ui .info .title { color: #fafafa; }
+    .swagger-ui .info .title small { background: #27272a; color: #a1a1aa; }
+    .swagger-ui .info p, .swagger-ui .info li, .swagger-ui .info .base-url { color: #a1a1aa; }
+    .swagger-ui .scheme-container { background: #18181b; box-shadow: none; }
+    .swagger-ui { filter: invert(88%) hue-rotate(180deg); }
+    .swagger-ui img { filter: invert(100%) hue-rotate(180deg); }
+    .nav-bar {
+      display: flex; gap: 1rem; padding: 0.75rem 1.25rem;
+      background: #09090b; border-bottom: 1px solid #27272a;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px; letter-spacing: 0.08em;
+    }
+    .nav-bar a { color: #71717a; text-decoration: none; }
+    .nav-bar a:hover { color: #fafafa; }
+    .nav-bar a.active { color: #fafafa; border-bottom: 1px solid #fafafa; padding-bottom: 2px; }
+  </style>
+</head>
+<body>
+  <nav class="nav-bar">
+    <a href="/">TOKENTA</a>
+    <a href="/docs/">TERMINAL API</a>
+    <a href="/docs/verification/" class="active">VERIFICATION API</a>
+    <a href="/openapi/verification.json">OPENAPI JSON</a>
+  </nav>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script>
+    SwaggerUIBundle({
+      url: "/openapi/verification.json",
+      dom_id: "#swagger-ui",
+      presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+      layout: "BaseLayout",
+      deepLinking: true,
+      displayRequestDuration: true,
+    });
+  </script>
+</body>
+</html>

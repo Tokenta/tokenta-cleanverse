@@ -25,9 +25,13 @@ export function assessPlatformRisk(input: PlatformRiskInput): PlatformRiskAssess
   const customLike =
     input.provider === "custom" || input.provider === "openai_compatible";
   const jobs24h = abuseJobCount24h(input.keyFingerprint);
-  const highVelocity = jobs24h >= 3 && input.context !== "LIVE";
+  // highVelocity is flagged for ops visibility but does NOT contribute to grayMarket.
+  // grayMarket (spec §9A.2) means custom/reseller endpoint, not repeated test submissions.
+  // Conflating the two pushed trustScore above 0.8 for developers testing the same key
+  // multiple times, causing spurious REVIEW outcomes.
+  const highVelocity = jobs24h >= 5 && input.context !== "LIVE";
   const blacklisted = isBlacklistedFingerprint(input.keyFingerprint);
-  const grayMarket = customLike || highVelocity;
+  const grayMarket = customLike;
 
   const flags: string[] = [];
   if (customLike) flags.push("CUSTOM_ENDPOINT");

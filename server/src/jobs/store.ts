@@ -85,7 +85,10 @@ export class JobStore {
       job.events.push(event);
       if (event.step) {
         const stepIndex = ["CONNECTIVITY", "QUOTA", "RATE_LIMIT", "RISK_ANALYSIS", "FINALIZE"].indexOf(event.step);
-        if (stepIndex >= 0 && event.type === "step_completed") {
+        if (
+          stepIndex >= 0 &&
+          (event.type === "step_completed" || event.type === "step_failed")
+        ) {
           job.stepsCompleted = Math.max(job.stepsCompleted, stepIndex + 1);
         }
       }
@@ -158,6 +161,12 @@ export class JobStore {
       p50_duration_ms: p50,
       slo_standard_under_60s_pct: Number(sloPct.toFixed(1)),
     };
+  }
+
+  /** Dev-only: wipe all jobs and listeners (used by POST /dev/reset). */
+  resetForDev(): void {
+    this.jobs.clear();
+    this.listeners.clear();
   }
 }
 

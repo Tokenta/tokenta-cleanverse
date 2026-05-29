@@ -119,6 +119,15 @@ export const terminalOpenApi = {
     "/wallet/summary": {
       get: { tags: ["Wallet"], summary: "Wallet balances and settlement", operationId: "getTerminalWalletSummary" },
     },
+    "/wallet/income": {
+      get: { tags: ["Wallet"], summary: "Seller sale income summary", operationId: "getTerminalWalletIncome" },
+    },
+    "/wallet/deposit": {
+      post: { tags: ["Wallet"], summary: "Deposit USDC (testnet sim)", operationId: "terminalWalletDeposit" },
+    },
+    "/wallet/withdraw": {
+      post: { tags: ["Wallet"], summary: "Withdraw USDC to connected wallet", operationId: "terminalWalletWithdraw" },
+    },
     "/analytics/overview": {
       get: { tags: ["Analytics"], summary: "Analytics dashboard", operationId: "getTerminalAnalyticsOverview" },
     },

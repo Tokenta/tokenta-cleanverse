@@ -1,6 +1,6 @@
 import { ChevronRight, Plus, Search } from "lucide-react";
-import { filterListings } from "./tokenta-data";
-import type { BuyMarketSource, EnhancedListing, MarketFilters, MarketSortKey, SellMarketTab, TradingMode } from "../trading-types";
+import { filterListings } from "../market-utils";
+import type { BuybackOffer, BuyMarketSource, EnhancedListing, MarketFilters, MarketSortKey, SellMarketTab, TradingMode } from "../trading-types";
 import {
   AccessMethodBadge,
   ComplianceBadge,
@@ -34,6 +34,9 @@ export function EnhancedMarketPanel({
   onListApi,
   onBuyApi,
   onSellToTokenta,
+  myListings,
+  buybackOffers,
+  pendingBuybackOrders,
 }: {
   mode: TradingMode;
   buySource: BuyMarketSource;
@@ -41,7 +44,7 @@ export function EnhancedMarketPanel({
   sellTab: SellMarketTab;
   onSellTabChange: (t: SellMarketTab) => void;
   listings: EnhancedListing[];
-  active: EnhancedListing;
+  active: EnhancedListing | null;
   setSelectedAsset: (id: string) => void;
   filters: MarketFilters;
   onFiltersChange: (f: MarketFilters) => void;
@@ -50,6 +53,9 @@ export function EnhancedMarketPanel({
   onListApi: () => void;
   onBuyApi: () => void;
   onSellToTokenta: () => void;
+  myListings: EnhancedListing[];
+  buybackOffers: BuybackOffer[];
+  pendingBuybackOrders: import("../api/verification").TerminalOrderRow[];
 }) {
   if (mode === "SELL") {
     return (
@@ -59,6 +65,9 @@ export function EnhancedMarketPanel({
           onSellTabChange={onSellTabChange}
           onListApi={onListApi}
           onSellToTokenta={onSellToTokenta}
+          myListings={myListings}
+          buybackOffers={buybackOffers}
+          pendingBuybackOrders={pendingBuybackOrders}
         />
       </div>
     );
@@ -113,8 +122,15 @@ export function EnhancedMarketPanel({
               </tr>
             </thead>
             <tbody>
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={7} className="px-3 py-8 text-center text-white/40 tracking-[0.12em]">
+                    No live listings yet. Sellers must verify an API key before appearing here.
+                  </td>
+                </tr>
+              )}
               {rows.map((a) => {
-                const isActive = a.id === active.id;
+                const isActive = a.id === active?.id;
                 const tokenta = isTokentaListing(a);
                 const verifyLabel = a.verificationState
                   ? a.verificationState
@@ -205,7 +221,7 @@ export function EnhancedMarketPanel({
           </div>
         </TokentaScrollArea>
       </div>
-      {active.accessMethod === "PROXY_GATEWAY" && isTokentaListing(active) && (
+      {active?.accessMethod === "PROXY_GATEWAY" && isTokentaListing(active) && (
         <div className="border-t border-white/15 p-3 text-[10px] tracking-[0.12em] text-white/50">
           TOKENTA DIRECT · Proxy gateway access · Platform-issued key · No buyer deposit
         </div>

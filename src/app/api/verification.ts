@@ -94,11 +94,13 @@ export async function verificationFetch(
 
 export interface MarketListingRow {
   listingId: string;
+  sellerWallet?: string | null;
   providerKind: string;
   quotaToSell: number;
   quotaUnit: string;
   askPriceUsdc: number;
   verificationState: string;
+  listingStatus?: string;
   terminalOutcome?: string;
   proofHash?: string;
   capabilityScore?: number;
@@ -135,7 +137,9 @@ export type EngineJobStatus = "QUEUED" | "RUNNING" | "PASSED" | "FAILED";
 
 export interface VerificationJobResponse {
   jobId: string;
+  terminalJobId?: string;
   status: EngineJobStatus | string;
+  terminalStatus?: string;
   terminalOutcome?: TerminalOutcome;
   proof?: VerificationProof;
   stepsCompleted: number;
@@ -143,6 +147,8 @@ export interface VerificationJobResponse {
   createdAt: string;
   events?: VerificationJobEvent[];
   snapshotAt?: string;
+  error?: string;
+  progress?: { step: string | null; percent: number; stepsCompleted: number; stepsTotal: number };
 }
 
 export interface VerificationJobEvent {
@@ -172,18 +178,26 @@ export async function createListing(body: {
   providerKind?: string;
   claimedModel?: string;
   autoListAfterVerify?: boolean;
-}): Promise<{ listingId: string; jobId: string; listingStatus: string }> {
+  compatibleBaseUrl?: string;
+}): Promise<{
+  listingId: string;
+  jobId: string;
+  terminalJobId: string;
+  listingStatus: string;
+  streamUrl?: string;
+}> {
   const path = USE_TERMINAL_API ? "/api/v1/terminal/listings/run" : "/api/v1/listings";
   const res = await verificationFetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      providerKind: body.providerKind ?? "OpenAI-compatible",
+      providerKind: body.providerKind ?? "openai-compatible",
       apiKey: body.apiKey,
       credential: USE_TERMINAL_API ? { apiKey: body.apiKey } : undefined,
       quotaToSell: Number(body.quotaToSell),
       askPriceUsdc: Number(body.askPriceUsdc),
-      claimedModel: body.claimedModel ?? "gpt-4o-mini",
+      claimedModel: body.claimedModel,
+      compatibleBaseUrl: body.compatibleBaseUrl,
       autoListAfterVerify: body.autoListAfterVerify ?? true,
     }),
   });
@@ -202,6 +216,30 @@ export async function fetchMarketListings(): Promise<MarketListingRow[]> {
     if (!res.ok) return [];
     const data = (await res.json()) as { listings: MarketListingRow[] };
     return data.listings ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export async function fetchMyListings(): Promise<MarketListingRow[]> {
+  try {
+    const res = await verificationFetch("/api/v1/terminal/market/my-listings");
+    if (!res.ok) return [];
+    const data = (await res.json()) as { listings: MarketListingRow[] };
+    return data.listings ?? [];
+  } catch {
+    return [];
+  }
+}
+
+export async function fetchBuybackOffers(): Promise<
+  import("../trading-types").BuybackOffer[]
+> {
+  try {
+    const res = await verificationFetch("/api/v1/terminal/buyback/offers");
+    if (!res.ok) return [];
+    const data = (await res.json()) as { offers: import("../trading-types").BuybackOffer[] };
+    return data.offers ?? [];
   } catch {
     return [];
   }
@@ -259,7 +297,16 @@ export async function fetchMetricsHealth(): Promise<{
       USE_TERMINAL_API ? "/api/v1/terminal/metrics/health" : "/api/v1/metrics/health",
     );
     if (!res.ok) throw new Error("metrics unavailable");
-    return res.json();
+    const body = await res.json();
+    return {
+      ...body,
+      avg_tokens_used: Number(body.avg_tokens_used ?? body.avgTokensUsed ?? 0),
+      success_rate: Number(body.success_rate ?? 0),
+      queue_depth: Number(body.queue_depth ?? 0),
+      monitor_stale: Number(body.monitor_stale ?? 0),
+      p50_duration_ms: Number(body.p50_duration_ms ?? 0),
+      slo_standard_under_60s_pct: Number(body.slo_standard_under_60s_pct ?? 100),
+    };
   } catch {
     return {
       queue_depth: 0,
@@ -368,9 +415,14 @@ export function marketRowToEnhanced(row: MarketListingRow): EnhancedListing {
     volume: "—",
     verified: state === "VERIFIED" ? "LIVE" : "PENDING",
     uptime: "—",
-    status: state === "LIVE" || state === "VERIFIED" ? "LIVE" : state === "STALE" ? "STALE" : "VERIFYING",
+    status:
+      row.listingStatus === "LIVE" || row.verificationState === "LIVE" || row.verificationState === "VERIFIED"
+        ? "LIVE"
+        : row.listingStatus === "VERIFYING" || row.verificationState === "VERIFYING"
+          ? "VERIFYING"
+          : row.listingStatus ?? row.verificationState,
     listingSource: "P2P",
-    seller: "@seller",
+    seller: row.sellerWallet ? `${row.sellerWallet.slice(0, 8)}…` : "@seller",
     accessMethod: "DIRECT_KEY",
     depositStatus: "SELLER_BONDED",
     depositRequired: true,
@@ -399,10 +451,7 @@ export async function fetchVerifyFeed(): Promise<VerifyFeedRow[]> {
 }
 
 function mapProviderKind(label: string): string {
-  const k = label.toLowerCase();
-  if (k.includes("anthropic")) return "anthropic";
-  if (k.includes("google")) return "google";
-  return "openai";
+  return label.trim() || "openai-compatible";
 }
 
 function contextToTerminalMode(context?: string): string {
@@ -425,6 +474,7 @@ export async function createVerificationJob(body: {
   declaredQuantity: number;
   provider?: string;
   claimedModel?: string;
+  compatibleBaseUrl?: string;
   context?: string;
   buybackOfferId?: string;
   allowPartialVerify?: boolean;
@@ -439,9 +489,10 @@ export async function createVerificationJob(body: {
   const payload = USE_TERMINAL_API
     ? {
         mode: contextToTerminalMode(context),
-        provider: mapProviderKind(body.provider ?? "openai"),
+        provider: mapProviderKind(body.provider ?? "openai-compatible"),
         declaredQuantity: Number(body.declaredQuantity),
-        claimedModel: body.claimedModel ?? "gpt-4o-mini",
+        claimedModel: body.claimedModel,
+        compatibleBaseUrl: body.compatibleBaseUrl,
         costLiability: body.costLiability ?? "SELLER_PAID",
         listingId: body.sellerListingId,
         orderId: body.orderId,
@@ -483,11 +534,47 @@ export async function createVerificationJob(body: {
   return res.json();
 }
 
+function isTerminalJobDone(status: string | undefined): boolean {
+  const s = (status ?? "").toLowerCase();
+  return (
+    s === "passed" ||
+    s === "failed" ||
+    s === "completed" ||
+    s === "cancelled"
+  );
+}
+
 export function subscribeJobEvents(
   jobId: string,
   onEvent: (ev: VerificationJobEvent) => void,
   onDone?: () => void,
 ): () => void {
+  let closed = false;
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+  const finish = () => {
+    if (closed) return;
+    closed = true;
+    if (pollTimer) clearInterval(pollTimer);
+    es.close();
+    onDone?.();
+  };
+
+  const syncFromApi = async () => {
+    if (closed) return;
+    try {
+      const j = await getVerificationJob(jobId);
+      if (j.events?.length) {
+        for (const ev of j.events) onEvent(ev);
+      }
+      if (isTerminalJobDone(j.status) || isTerminalJobDone(j.terminalStatus)) {
+        finish();
+      }
+    } catch {
+      /* polling fallback — ignore transient errors */
+    }
+  };
+
   const url = USE_TERMINAL_API
     ? `${API_BASE}${terminalJobPath(jobId)}/events`
     : `${API_BASE}/api/v1/verification/jobs/${jobId}/events`;
@@ -498,8 +585,7 @@ export function subscribeJobEvents(
       const data = JSON.parse(e.data) as VerificationJobEvent;
       onEvent(data);
       if (data.type === "job_completed" || data.type === "job_failed") {
-        onDone?.();
-        es.close();
+        finish();
       }
     } catch {
       /* ignore parse errors */
@@ -513,11 +599,17 @@ export function subscribeJobEvents(
   es.onmessage = handler;
 
   es.onerror = () => {
-    onDone?.();
-    es.close();
+    void syncFromApi();
   };
 
-  return () => es.close();
+  pollTimer = setInterval(() => void syncFromApi(), 2000);
+  void syncFromApi();
+
+  return () => {
+    closed = true;
+    if (pollTimer) clearInterval(pollTimer);
+    es.close();
+  };
 }
 
 export interface VerificationTrailEntry {
@@ -622,6 +714,28 @@ export async function bindListingVerification(
   }
 }
 
+export async function devResetData(): Promise<{ cleared: boolean } | null> {
+  try {
+    const res = await verificationFetch("/api/v1/terminal/dev/reset", { method: "POST" });
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function publishListing(
+  listingId: string,
+): Promise<{ listing: unknown; status: string } | { error: string; currentStatus?: string; code?: string }> {
+  const res = await verificationFetch(
+    `/api/v1/terminal/listings/${listingId}/publish`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+  );
+  const data = await res.json();
+  if (!res.ok) return data as { error: string; currentStatus?: string; code?: string };
+  return data as { listing: unknown; status: string };
+}
+
 export async function signEscrowPayloadDev(body: {
   orderId: string;
   amountUsdc: string;
@@ -646,6 +760,10 @@ export async function fundOrderEscrow(
   orderId: string,
   amountUsdc: string,
   signature?: string,
+  /** Real on-chain transfer tx hash. When present the backend persists it instead
+   * of minting a placeholder, and skips the ledger debit (because the buyer's
+   * USDC has already left their wallet). */
+  txHash?: string,
 ): Promise<{ escrow: { status: string; fundTxHash?: string } } | null> {
   try {
     const res = await verificationFetch(
@@ -655,7 +773,7 @@ export async function fundOrderEscrow(
       {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ amountUsdc, signature }),
+      body: JSON.stringify({ amountUsdc, signature, txHash }),
     });
     if (!res.ok) return null;
     return res.json();
@@ -668,7 +786,23 @@ export async function releaseOrderEscrow(
   orderId: string,
   amountUsdc: string,
   signature?: string,
-): Promise<{ escrow: { status: string } } | null> {
+): Promise<{
+  escrow: { status: string; releaseTxHash?: string };
+  sellerPayout?: {
+    netUsdc: string;
+    feeUsdc: string;
+    payoutTxHash: string;
+    treasuryTxHash?: string;
+    onChainMode?: string;
+  };
+  settlement?: {
+    mode: string;
+    escrowWallet?: string;
+    treasuryWallet?: string;
+    sellerTxHash?: string;
+    treasuryTxHash?: string;
+  };
+} | null> {
   try {
     const res = await verificationFetch(
       USE_TERMINAL_API
@@ -756,6 +890,7 @@ export async function submitTerminalAnchor(
 export interface TerminalOrderRow {
   orderId: string;
   listingId: string;
+  sellerWallet: string | null;
   buyerWallet: string | null;
   mode: "BUYOUT" | "PARTIAL";
   quantity: number;
@@ -764,9 +899,51 @@ export interface TerminalOrderRow {
   createdAt: string;
 }
 
-export async function fetchTerminalOrders(wallet?: string): Promise<TerminalOrderRow[]> {
+export function computePurchaseAmountUsdc(input: {
+  askPriceUsdc: number;
+  supplyTokens: number;
+  mode: "BUYOUT" | "PARTIAL";
+  quantity: number;
+}): string {
+  const units = input.mode === "BUYOUT" ? input.supplyTokens : input.quantity;
+  return Math.max(0.01, (input.askPriceUsdc * units) / 1_000_000).toFixed(2);
+}
+
+export async function fetchTerminalOrder(
+  orderId: string,
+): Promise<TerminalOrderRow | null> {
   try {
-    const q = wallet ? `?wallet=${encodeURIComponent(wallet)}` : "";
+    const res = await verificationFetch(`/api/v1/terminal/orders/${orderId}`);
+    if (!res.ok) return null;
+    const data = (await res.json()) as { order?: TerminalOrderRow };
+    return data.order ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchTerminalOrderEscrow(
+  orderId: string,
+): Promise<{ status: string; amountUsdc?: string; fundTxHash?: string; releaseTxHash?: string } | null> {
+  try {
+    const res = await verificationFetch(`/api/v1/terminal/orders/${orderId}/escrow`);
+    if (!res.ok) return null;
+    const data = (await res.json()) as { escrow?: { status: string; amountUsdc?: string } };
+    return data.escrow ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchTerminalOrders(opts?: {
+  wallet?: string;
+  role?: "buyer" | "seller" | "all";
+}): Promise<TerminalOrderRow[]> {
+  try {
+    const params = new URLSearchParams();
+    if (opts?.wallet) params.set("wallet", opts.wallet);
+    if (opts?.role) params.set("role", opts.role);
+    const q = params.toString() ? `?${params}` : "";
     const res = await verificationFetch(`/api/v1/terminal/orders${q}`);
     if (!res.ok) return [];
     const data = (await res.json()) as { orders?: TerminalOrderRow[] };
@@ -798,14 +975,72 @@ export async function purchaseListingTerminal(body: {
   mode?: "BUYOUT" | "PARTIAL";
   quantity?: number;
   amountUsdc?: string;
-}): Promise<{ orderId: string } | null> {
+}): Promise<{ orderId: string; order?: TerminalOrderRow }> {
   const res = await verificationFetch("/api/v1/terminal/orders/purchase", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) return null;
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as { error?: string }).error ?? res.statusText);
+  }
   return res.json();
+}
+
+export interface SellerIncomeResponse {
+  wallet: string;
+  availableUsdc: string;
+  lifetimeEarnedUsdc: string;
+  pendingEscrowUsdc: string;
+  saleCount: number;
+}
+
+export async function fetchSellerIncome(): Promise<SellerIncomeResponse | null> {
+  try {
+    const res = await verificationFetch("/api/v1/terminal/wallet/income");
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function walletDepositTerminal(
+  amountUsdc: string,
+): Promise<WalletSummaryResponse | null> {
+  try {
+    const res = await verificationFetch("/api/v1/terminal/wallet/deposit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ amountUsdc }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { summary?: WalletSummaryResponse };
+    return data.summary ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function walletWithdrawTerminal(
+  amountUsdc: string,
+): Promise<{ txHash?: string; summary?: WalletSummaryResponse } | null> {
+  try {
+    const res = await verificationFetch("/api/v1/terminal/wallet/withdraw", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ amountUsdc }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error((err as { error?: string }).error ?? res.statusText);
+    }
+    return res.json();
+  } catch (e) {
+    if (e instanceof Error) throw e;
+    return null;
+  }
 }
 
 export interface OrderRoomMessage {
@@ -990,6 +1225,13 @@ export interface TerminalNetworkResponse {
   connected: boolean;
   blockNumber: number | null;
   gasPriceGwei: string | null;
+  usdcAddress?: string;
+  escrowWallet?: string;
+  treasuryWallet?: string;
+  escrowWalletConfigured?: boolean;
+  treasuryWalletConfigured?: boolean;
+  escrowReleaseSignerConfigured?: boolean;
+  escrowOperatorAddress?: string | null;
 }
 
 export async function fetchTerminalNetwork(): Promise<TerminalNetworkResponse | null> {
@@ -1007,6 +1249,13 @@ export async function fetchTerminalNetwork(): Promise<TerminalNetworkResponse | 
       connected: body.connected ?? false,
       blockNumber: body.blockNumber ?? null,
       gasPriceGwei: body.gasPriceGwei ?? null,
+      usdcAddress: body.usdcAddress,
+      escrowWallet: body.escrowWallet,
+      treasuryWallet: body.treasuryWallet,
+      escrowWalletConfigured: body.escrowWalletConfigured,
+      treasuryWalletConfigured: body.treasuryWalletConfigured,
+      escrowReleaseSignerConfigured: body.escrowReleaseSignerConfigured,
+      escrowOperatorAddress: body.escrowOperatorAddress,
     };
   } catch {
     return null;
@@ -1042,6 +1291,47 @@ export async function runOrderRoomAction(
     }
     const data = (await res.json()) as { jobId?: string };
     return { ok: true, jobId: data.jobId };
+  } catch {
+    return null;
+  }
+}
+
+/** Updates the ask price of the caller's listing. Returns the updated listing row or an error. */
+export async function updateListingPrice(
+  listingId: string,
+  askPriceUsdc: number,
+): Promise<{ askPriceUsdc: number; listingId: string } | { error: string; code?: string }> {
+  const res = await verificationFetch(`/api/v1/terminal/listings/${listingId}/price`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ askPriceUsdc }),
+  });
+  const data = await res.json();
+  if (!res.ok) return data as { error: string; code?: string };
+  return data as { askPriceUsdc: number; listingId: string };
+}
+
+export interface TreasuryResponse {
+  treasuryWallet: string;
+  availableUsdc: string;
+  lifetimeFeesUsdc: string;
+  feeBps: number;
+  feePct: string;
+  recentEvents: Array<{
+    id: string;
+    amountUsdc: string;
+    orderId?: string;
+    txHash?: string;
+    at: string;
+  }>;
+}
+
+/** Fetches the Tokenta treasury balance and recent fee events. */
+export async function fetchTreasuryBalance(): Promise<TreasuryResponse | null> {
+  try {
+    const res = await verificationFetch("/api/v1/terminal/wallet/treasury");
+    if (!res.ok) return null;
+    return res.json();
   } catch {
     return null;
   }

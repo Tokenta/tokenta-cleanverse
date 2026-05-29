@@ -1,0 +1,12 @@
+Live URLs
+Page	URL
+Terminal API (main)
+https://tokenta-swagger.vercel.app/docs/
+Verification engine API
+https://tokenta-swagger.vercel.app/docs/verification/
+OpenAPI JSON (Terminal)
+https://tokenta-swagger.vercel.app/openapi/terminal.json
+OpenAPI JSON (Verification)
+https://tokenta-swagger.vercel.app/openapi/verification.json
+Root (redirects to /docs/)
+https://tokenta-swagger.vercel.app/

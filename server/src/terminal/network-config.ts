@@ -1,5 +1,13 @@
 import { createPublicClient, http } from "viem";
 import { baseSepolia } from "viem/chains";
+import {
+  ESCROW_WALLET,
+  TREASURY_WALLET,
+  USDC_ADDRESS,
+  isEscrowWalletConfigured,
+  isTreasuryWalletConfigured,
+} from "../config/settlement-wallets.js";
+import { escrowOperatorAddress, isEscrowReleaseSignerConfigured } from "./escrow-release.js";
 import { isTreasurySignerConfigured } from "./wallet-service.js";
 
 export const BASE_SEPOLIA_CHAIN_ID = 84532;
@@ -15,6 +23,13 @@ export interface SettlementNetworkView {
   dryRun: boolean;
   treasurySignerConfigured: boolean;
   proofAnchorRpcConfigured: boolean;
+  usdcAddress: string;
+  escrowWallet: string;
+  treasuryWallet: string;
+  escrowWalletConfigured: boolean;
+  treasuryWalletConfigured: boolean;
+  escrowReleaseSignerConfigured: boolean;
+  escrowOperatorAddress: string | null;
 }
 
 export function settlementRpcUrl(): string {
@@ -44,6 +59,13 @@ export function getSettlementNetworkConfig(): SettlementNetworkView {
     dryRun: process.env.SETTLEMENT_DRY_RUN !== "false",
     treasurySignerConfigured: isTreasurySignerConfigured(),
     proofAnchorRpcConfigured: !!(process.env.PROOF_ANCHOR_RPC_URL || process.env.SETTLEMENT_RPC_URL),
+    usdcAddress: USDC_ADDRESS,
+    escrowWallet: ESCROW_WALLET,
+    treasuryWallet: TREASURY_WALLET,
+    escrowWalletConfigured: isEscrowWalletConfigured(),
+    treasuryWalletConfigured: isTreasuryWalletConfigured(),
+    escrowReleaseSignerConfigured: isEscrowReleaseSignerConfigured(),
+    escrowOperatorAddress: escrowOperatorAddress(),
   };
 }
 

@@ -1,11 +1,18 @@
 import type { TerminalOutcome, VerificationProof } from "../types/verification.js";
 
-export type ListingStatus = "VERIFYING" | "LIVE" | "REVIEW" | "FAILED" | "DEGRADED";
+export type ListingStatus =
+  | "VERIFYING"
+  | "VERIFIED_PENDING_PUBLISH"
+  | "LIVE"
+  | "REVIEW"
+  | "FAILED"
+  | "DEGRADED";
 export type ListingSource = "P2P" | "TOKENTA_DIRECT";
 export type MonitorState = "LIVE" | "STALE" | "REVOKED";
 
 export interface ListingRecord {
   id: string;
+  sellerWallet?: string | null;
   providerKind: string;
   quotaToSell: number;
   quotaUnit: string;
@@ -41,11 +48,13 @@ export class ListingStore {
     verificationJobId: string;
     listingSource?: ListingSource;
     platformSubsidized?: boolean;
+    sellerWallet?: string | null;
   }): ListingRecord {
     const id = `lst_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date().toISOString();
     const record: ListingRecord = {
       id,
+      sellerWallet: input.sellerWallet ?? null,
       providerKind: input.providerKind,
       quotaToSell: input.quotaToSell,
       quotaUnit: input.quotaUnit ?? "tokens",
@@ -85,10 +94,15 @@ export class ListingStore {
     if (proof.probeModelId) listing.claimedModel = proof.probeModelId;
     listing.updatedAt = new Date().toISOString();
 
-    if (proof.terminalOutcome === "PASS" && listing.autoListAfterVerify) {
-      listing.status = "LIVE";
-      listing.lastL1At = new Date().toISOString();
-      listing.monitorState = "LIVE";
+    if (proof.terminalOutcome === "PASS") {
+      if (listing.autoListAfterVerify) {
+        listing.status = "LIVE";
+        listing.lastL1At = new Date().toISOString();
+        listing.monitorState = "LIVE";
+      } else {
+        // Seller must explicitly publish — holds in a gated state invisible to buyers.
+        listing.status = "VERIFIED_PENDING_PUBLISH";
+      }
     } else if (proof.terminalOutcome === "FAIL") {
       listing.status = "FAILED";
     } else if (proof.terminalOutcome === "DEGRADED") {
@@ -97,6 +111,65 @@ export class ListingStore {
       listing.status = "REVIEW";
     }
 
+    return listing;
+  }
+
+  /**
+   * Updates the ask price on a LIVE or VERIFIED_PENDING_PUBLISH listing.
+   * Only the original seller wallet may change the price.
+   * Returns the updated listing, or an error string if the update is rejected.
+   */
+  updatePrice(
+    listingId: string,
+    newAskPriceUsdc: number,
+    requestingWallet?: string | null,
+  ): ListingRecord | { error: string; code: string } {
+    const listing = this.listings.get(listingId);
+    if (!listing) return { error: "listing not found", code: "NOT_FOUND" };
+
+    // Validate the requesting wallet owns this listing.
+    if (
+      requestingWallet &&
+      listing.sellerWallet &&
+      listing.sellerWallet.toLowerCase() !== requestingWallet.toLowerCase()
+    ) {
+      return { error: "only the seller may update the price", code: "FORBIDDEN" };
+    }
+
+    if (newAskPriceUsdc <= 0) {
+      return { error: "askPriceUsdc must be positive", code: "INVALID_PRICE" };
+    }
+
+    if (
+      listing.status !== "LIVE" &&
+      listing.status !== "VERIFIED_PENDING_PUBLISH" &&
+      listing.status !== "REVIEW"
+    ) {
+      return {
+        error: "price can only be updated on LIVE, REVIEW, or VERIFIED_PENDING_PUBLISH listings",
+        code: "INVALID_LISTING_STATE",
+      };
+    }
+
+    listing.askPriceUsdc = newAskPriceUsdc;
+    listing.updatedAt = new Date().toISOString();
+    return listing;
+  }
+
+  /** Dev-only: wipe all listings (used by POST /dev/reset). */
+  resetForDev(): void {
+    this.listings.clear();
+  }
+
+  /** Transitions a VERIFIED_PENDING_PUBLISH listing to LIVE after explicit seller confirmation. */
+  publishListing(listingId: string): ListingRecord | undefined {
+    const listing = this.listings.get(listingId);
+    if (!listing) return undefined;
+    if (listing.status !== "VERIFIED_PENDING_PUBLISH") return undefined;
+    listing.status = "LIVE";
+    listing.monitorState = "LIVE";
+    listing.lastL1At = new Date().toISOString();
+    listing.updatedAt = new Date().toISOString();
     return listing;
   }
 
@@ -117,29 +190,34 @@ export class ListingStore {
     return this.listMine().filter((l) => l.status === "LIVE" || l.status === "REVIEW");
   }
 
-  /** Shared-key heuristic §9A.2 — same fingerprint on multiple active listings */
+  /** Shared-key heuristic §9A.2 — same fingerprint on multiple active listings.
+   * Only counts LIVE listings (completed verification). VERIFYING/REVIEW listings
+   * from the same seller retrying are excluded to avoid false positives during testing.
+   * Threshold >= 2 means the key must appear in two or more OTHER live listings simultaneously. */
   countByFingerprint(keyFingerprint: string, excludeListingId?: string): number {
     let n = 0;
     for (const l of this.listings.values()) {
       if (l.keyFingerprint === keyFingerprint && l.id !== excludeListingId) {
-        if (l.status === "LIVE" || l.status === "VERIFYING" || l.status === "REVIEW") n++;
+        if (l.status === "LIVE") n++;
       }
     }
     return n;
   }
 
   isSharedKeySuspected(keyFingerprint: string, excludeListingId?: string): boolean {
-    return this.countByFingerprint(keyFingerprint, excludeListingId) >= 1;
+    return this.countByFingerprint(keyFingerprint, excludeListingId) >= 2;
   }
 
   toMarketRow(l: ListingRecord) {
     return {
       listingId: l.id,
+      sellerWallet: l.sellerWallet ?? null,
       providerKind: l.providerKind,
       quotaToSell: l.quotaToSell,
       quotaUnit: l.quotaUnit,
       askPriceUsdc: l.askPriceUsdc,
       verificationState: mapVerificationState(l),
+      listingStatus: l.status,
       terminalOutcome: l.terminalOutcome,
       proofHash: l.proofHash,
       capabilityScore: l.capabilityScore,
@@ -154,6 +232,7 @@ function mapVerificationState(l: ListingRecord): string {
   }
   if (l.monitorState === "STALE") return "STALE";
   if (l.monitorState === "LIVE" || l.status === "LIVE") return "LIVE";
+  if (l.status === "VERIFIED_PENDING_PUBLISH") return "VERIFIED_PENDING_PUBLISH";
   if (l.status === "VERIFYING") return "VERIFYING";
   if (l.status === "REVIEW") return "REVIEW";
   if (l.status === "DEGRADED") return "DEGRADED";

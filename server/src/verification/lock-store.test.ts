@@ -16,10 +16,11 @@ describe("VerificationLockStore TERMINAL_FAIL_LOCKED", () => {
     expect(store.canProbeL2(fp, true)).toBe(false);
   });
 
-  it("blocks L2 after INVALID_KEY without auto-unlock", () => {
+  it("does not terminal-lock after INVALID_KEY (allows provider correction retries)", () => {
     const fp = "def456";
     store.applyFailure(fp, "INVALID_KEY");
-    expect(store.get(fp)).toBe("TERMINAL_FAIL_LOCKED");
+    expect(store.get(fp)).toBe("UNLOCKED");
+    expect(store.canProbeL2(fp, false)).toBe(true);
   });
 
   it("allows probe after unlock via clear", () => {

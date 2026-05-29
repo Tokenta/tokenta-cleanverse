@@ -12,6 +12,9 @@ export function defaultProbeModel(provider: ProviderKind, claimed?: string): str
       return claimed ?? "claude-3-5-haiku-20241022";
     case "google":
       return claimed ?? "gemini-1.5-flash";
+    case "openai_compatible":
+    case "custom":
+      return claimed ?? "gpt-4o-mini";
     default:
       return claimed ?? "gpt-4o-mini";
   }

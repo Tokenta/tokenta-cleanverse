@@ -1,25 +1,24 @@
 import { ArrowUpRight, ShieldCheck } from "lucide-react";
-import { buybackOffers, enhancedListings } from "./tokenta-data";
+import type { BuybackOffer, EnhancedListing, SellMarketTab } from "../trading-types";
 import { BuybackOfferCard } from "./trading-ui";
-import type { SellMarketTab } from "../trading-types";
-
-const ACTIVE_P2P_LISTINGS = enhancedListings.filter((l) => l.listingSource === "P2P").slice(0, 3);
-
-const PENDING_TOKENTA_SALES = [
-  { asset: "OpenAI", qty: "50k tok", price: "$900", status: "COMPLETED", deposit: "$1800 held", refund: "Jun 15" },
-  { asset: "Anthropic", qty: "20k tok", price: "$500", status: "ROTATION PENDING", deposit: "$1000 held", refund: "—" },
-];
+import type { TerminalOrderRow } from "../api/verification";
 
 export function SellMarketPanel({
   sellTab,
   onSellTabChange,
   onListApi,
   onSellToTokenta,
+  myListings,
+  buybackOffers,
+  pendingBuybackOrders,
 }: {
   sellTab: SellMarketTab;
   onSellTabChange: (tab: SellMarketTab) => void;
   onListApi: () => void;
   onSellToTokenta: (offerId?: string) => void;
+  myListings: EnhancedListing[];
+  buybackOffers: BuybackOffer[];
+  pendingBuybackOrders: TerminalOrderRow[];
 }) {
   const tabBtn = (tab: SellMarketTab, label: string) => (
     <button
@@ -56,11 +55,11 @@ export function SellMarketPanel({
             </button>
           </div>
 
-          <div className="px-4 py-2 text-[10px] tracking-[0.22em] text-white/40">YOUR ACTIVE P2P LISTINGS</div>
+          <div className="px-4 py-2 text-[10px] tracking-[0.22em] text-white/40">YOUR P2P LISTINGS</div>
           <table className="w-full text-[11px]">
             <thead className="border-b border-white/15 bg-black text-white/40">
               <tr className="tracking-[0.1em]">
-                {["ASSET", "QTY", "PRICE", "LISTED", "VIEWS", "STATUS", ""].map((h) => (
+                {["ASSET", "QTY", "PRICE", "LISTED", "STATUS", ""].map((h) => (
                   <th key={h} className="px-3 py-1.5 text-left font-normal">
                     {h}
                   </th>
@@ -68,7 +67,14 @@ export function SellMarketPanel({
               </tr>
             </thead>
             <tbody>
-              {ACTIVE_P2P_LISTINGS.map((l) => (
+              {myListings.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="px-3 py-6 text-center text-white/40">
+                    No listings yet. Create one to start selling on the marketplace.
+                  </td>
+                </tr>
+              )}
+              {myListings.map((l) => (
                 <tr key={l.id} className="border-b border-white/5 hover:bg-white/5">
                   <td className="px-3 py-2">{l.provider}</td>
                   <td className="px-3 py-2 tabular-nums">
@@ -76,9 +82,8 @@ export function SellMarketPanel({
                   </td>
                   <td className="px-3 py-2 tabular-nums">${l.price}/unit</td>
                   <td className="px-3 py-2 text-white/50">{l.verificationTimestamp}</td>
-                  <td className="px-3 py-2 tabular-nums">15</td>
-                  <td className="px-3 py-2">ACTIVE</td>
-                  <td className="px-3 py-2 text-[10px] tracking-[0.14em] text-white/50">EDIT · DELIST</td>
+                  <td className="px-3 py-2">{l.status}</td>
+                  <td className="px-3 py-2 text-[10px] tracking-[0.14em] text-white/50">VIEW</td>
                 </tr>
               ))}
             </tbody>
@@ -90,6 +95,9 @@ export function SellMarketPanel({
             <div className="text-[10px] tracking-[0.28em] text-white/40">TOKENTA BUYBACK PROGRAM</div>
             <p className="mt-1 text-[11px] text-white/55">Instant liquidity — not listed on the public marketplace.</p>
           </div>
+          {buybackOffers.length === 0 && (
+            <p className="text-[11px] text-white/40">No buyback offers available.</p>
+          )}
           {buybackOffers.map((o) => (
             <BuybackOfferCard key={o.id} offer={o} onAccept={() => onSellToTokenta(o.id)} />
           ))}
@@ -98,7 +106,7 @@ export function SellMarketPanel({
           <table className="w-full text-[11px]">
             <thead className="border-b border-white/15 text-white/40">
               <tr className="tracking-[0.1em]">
-                {["ASSET", "QTY", "SALE PRICE", "STATUS", "DEPOSIT", "REFUND DATE", ""].map((h) => (
+                {["ORDER", "QTY", "SALE PRICE", "STATUS", ""].map((h) => (
                   <th key={h} className="px-2 py-1.5 text-left font-normal">
                     {h}
                   </th>
@@ -106,14 +114,19 @@ export function SellMarketPanel({
               </tr>
             </thead>
             <tbody>
-              {PENDING_TOKENTA_SALES.map((r, i) => (
-                <tr key={i} className="border-b border-white/5">
-                  <td className="px-2 py-2">{r.asset}</td>
-                  <td className="px-2 py-2">{r.qty}</td>
-                  <td className="px-2 py-2 tabular-nums">{r.price}</td>
-                  <td className="px-2 py-2">{r.status}</td>
-                  <td className="px-2 py-2">{r.deposit}</td>
-                  <td className="px-2 py-2">{r.refund}</td>
+              {pendingBuybackOrders.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="px-2 py-4 text-center text-white/40">
+                    No pending buyback sales.
+                  </td>
+                </tr>
+              )}
+              {pendingBuybackOrders.map((o) => (
+                <tr key={o.orderId} className="border-b border-white/5">
+                  <td className="px-2 py-2 font-mono text-[10px]">{o.orderId.slice(0, 12)}…</td>
+                  <td className="px-2 py-2 tabular-nums">{o.quantity}</td>
+                  <td className="px-2 py-2 tabular-nums">{o.amountUsdc} USDC</td>
+                  <td className="px-2 py-2">{o.status}</td>
                   <td className="px-2 py-2 text-white/50">VIEW</td>
                 </tr>
               ))}

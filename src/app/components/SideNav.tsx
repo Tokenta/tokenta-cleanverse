@@ -1,5 +1,5 @@
 import { motion } from "motion/react";
-import { ChevronLeft, ChevronRight, Plus, Search } from "lucide-react";
+import { ChevronLeft, ChevronRight, Plus, Search, BookOpen } from "lucide-react";
 import { NAV_ITEMS, type NavKey } from "../nav-config";
 import type { BuyMarketSource, TradingMode } from "../trading-types";
 import { useTokentaWallet } from "../hooks/useTokentaWallet";
@@ -26,6 +26,8 @@ export function SideNav({
   buySource,
   onListApi,
   onBrowseMarket,
+  onOpenTourMenu,
+  tourCompleted,
 }: {
   open: boolean;
   onToggle: () => void;
@@ -35,6 +37,8 @@ export function SideNav({
   buySource: BuyMarketSource;
   onListApi: () => void;
   onBrowseMarket: () => void;
+  onOpenTourMenu: () => void;
+  tourCompleted?: boolean;
 }) {
   const { shortAddress } = useTokentaWallet();
   const activeItem = NAV_ITEMS.find((n) => n.key === nav);
@@ -135,6 +139,24 @@ export function SideNav({
                 BROWSE VERIFIED APIS
               </button>
             )}
+
+            {/* Guide / Tour button */}
+            <button
+              type="button"
+              onClick={onOpenTourMenu}
+              className={`relative w-full flex items-center gap-2 border py-2 px-2 text-[10px] tracking-[0.14em] transition-colors hover:bg-white/[0.06] ${
+                !tourCompleted
+                  ? "border-white/40 text-white/80"
+                  : "border-white/20 text-white/50"
+              }`}
+            >
+              <BookOpen className="h-3.5 w-3.5 shrink-0" />
+              <span>GUIDE · START TOUR</span>
+              {!tourCompleted && (
+                <span className="ml-auto h-1.5 w-1.5 rounded-full bg-white animate-pulse" />
+              )}
+            </button>
+
             <div className="pt-1 text-[10px] tracking-[0.22em] text-white/40">SESSION</div>
             <div className="flex items-center justify-between text-[10px]">
               <span className="text-white/60">Signed</span>
@@ -158,6 +180,20 @@ export function SideNav({
               className="flex h-8 w-8 items-center justify-center border border-white bg-white text-black hover:bg-white/90"
             >
               {mode === "SELL" ? <Plus className="h-3.5 w-3.5" /> : <Search className="h-3.5 w-3.5" />}
+            </button>
+            {/* Guide button (collapsed) */}
+            <button
+              type="button"
+              title="Guide · Start Tour"
+              onClick={onOpenTourMenu}
+              className={`relative flex h-8 w-8 items-center justify-center border transition-colors hover:bg-white/[0.06] ${
+                !tourCompleted ? "border-white/40 text-white/70" : "border-white/20 text-white/40"
+              }`}
+            >
+              <BookOpen className="h-3.5 w-3.5" />
+              {!tourCompleted && (
+                <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-white animate-pulse" />
+              )}
             </button>
             <div className="w-full border-t border-white/10" />
             <span className="max-w-full truncate px-0.5 text-[8px] tracking-[0.12em] text-white/40" title={shortAddress}>

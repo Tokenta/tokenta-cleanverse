@@ -20,9 +20,11 @@
     "db:reset": "prisma migrate reset --force",
     "db:smoke": "tsx scripts/persistence-smoke.ts",
     "db:integration": "tsx scripts/db-integration-smoke.ts",
-    "worker:region": "tsx scripts/worker-region.ts"
+    "worker:region": "tsx scripts/worker-region.ts",
+    "swagger:export": "tsx scripts/export-openapi.ts"
   },
   "dependencies": {
+    "dotenv": "^16.6.1",
     "@hono/node-server": "^1.14.4",
     "@prisma/client": "^6.8.2",
     "bullmq": "^5.76.10",

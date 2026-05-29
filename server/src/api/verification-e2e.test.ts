@@ -41,7 +41,7 @@ describe("verification API E2E", () => {
       jobId,
     );
 
-    expect(["PASSED", "FAILED", "REVIEW", "DEGRADED"]).toContain(finished.terminalOutcome);
+    expect(["PASS", "PASSED", "FAILED", "REVIEW", "DEGRADED"]).toContain(finished.terminalOutcome);
     expect(finished.proof?.probeManifest?.length).toBeGreaterThan(0);
     expect(finished.proof?.proofHash).toMatch(/^0x|^[a-f0-9]/i);
   });

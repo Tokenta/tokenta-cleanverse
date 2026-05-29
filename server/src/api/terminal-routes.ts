@@ -9,6 +9,7 @@ import { jobStore } from "../jobs/store.js";
 import { buildVerifyFeed } from "../jobs/feed.js";
 import { listingStore } from "../listings/store.js";
 import { buybackStore } from "../buyback/store.js";
+import { BUYBACK_OFFERS } from "../buyback/offers-catalog.js";
 import { listOrderVerification } from "../orders/verification-trail.js";
 import { getFraudMonitor, runFraudCheck } from "../verification/fraud-monitor.js";
 import { tickMonitorStates } from "../live-monitor/state.js";
@@ -57,14 +58,37 @@ import {
 } from "../terminal/order-room-store.js";
 import { buildReputationScore, buildReputationLedger } from "../terminal/reputation-service.js";
 import { buildWalletSummary } from "../terminal/wallet-summary.js";
+import {
+  creditSellerOnEscrowRelease,
+  computeOrderAmountUsdc,
+  depositWallet,
+  withdrawWallet,
+  getSellerIncomeSummary,
+  getTreasuryBalance,
+  getTreasuryLedger,
+  getTreasuryLifetimeFees,
+  TREASURY_WALLET,
+  PLATFORM_FEE_BPS,
+} from "../terminal/seller-wallet-ledger.js";
 import { buildAnalyticsOverview } from "../terminal/analytics-service.js";
 import {
   BASE_SEPOLIA_EXPLORER,
   fetchBaseSepoliaTelemetry,
   getSettlementNetworkConfig,
 } from "../terminal/network-config.js";
+import {
+  ESCROW_WALLET,
+  TREASURY_WALLET as CONFIG_TREASURY_WALLET,
+  USDC_ADDRESS,
+} from "../config/settlement-wallets.js";
+import { verifyEscrowFundTx } from "../terminal/escrow-usdc.js";
+import {
+  escrowOperatorAddress,
+  isEscrowReleaseSignerConfigured,
+  releaseEscrowOnChain,
+} from "../terminal/escrow-release.js";
 import { terminalOpenApi } from "./openapi-terminal.js";
-import type { TerminalRunMode } from "../terminal/types.js";
+import { listAiProviders } from "../verification/providers/catalog.js";
 import { isTreasurySignerConfigured, submitAnchorWithTreasury } from "../terminal/wallet-service.js";
 import {
   reconcilePendingAnchors,
@@ -73,6 +97,38 @@ import {
 
 const terminal = new Hono();
 const anchorSubmitInFlight = new Set<string>();
+
+async function settleSellerPayout(orderId: string) {
+  const order = getTerminalOrder(orderId);
+  if (!order?.sellerWallet) return null;
+
+  let onChain: Awaited<ReturnType<typeof releaseEscrowOnChain>> | null = null;
+  if (isEscrowReleaseSignerConfigured()) {
+    onChain = await releaseEscrowOnChain({
+      sellerWallet: order.sellerWallet,
+      grossUsdc: order.amountUsdc,
+      orderId,
+    });
+    if (!onChain.ok) {
+      throw new Error(onChain.error ?? "on-chain escrow release failed");
+    }
+  }
+
+  const ledger = creditSellerOnEscrowRelease({
+    sellerWallet: order.sellerWallet,
+    grossUsdc: order.amountUsdc,
+    orderId,
+    buyerWallet: order.buyerWallet,
+    payoutTxHash: onChain?.sellerTxHash,
+    feeTxHash: onChain?.treasuryTxHash,
+  });
+
+  return {
+    ...ledger,
+    onChainMode: onChain?.mode ?? "ledger-only",
+    treasuryTxHash: onChain?.treasuryTxHash ?? ledger.feeTxHash,
+  };
+}
 
 function sessionIdFromRequest(c: { req: { header: (n: string) => string | undefined } }): string | null {
   return c.req.header("X-Terminal-Session") ?? null;
@@ -96,12 +152,27 @@ function requireTerminalSession(c: {
   return { sessionId: sid };
 }
 
+terminal.get("/providers", (c) => {
+  return c.json({
+    providers: listAiProviders().map((p) => ({
+      slug: p.slug,
+      label: p.label,
+      defaultModel: p.defaultModel,
+      region: p.region,
+      hint: p.hint ?? null,
+      requiresBaseUrl: p.slug === "custom" || p.slug === "openai-compatible",
+    })),
+  });
+});
+
 terminal.get("/health", (c) => {
   const net = getSettlementNetworkConfig();
   return c.json({
     ok: true,
     layer: "terminal",
     queueBackend: queueBackend(),
+    verificationMock: process.env.VERIFICATION_MOCK === "true",
+    openAiCompatibleBaseUrl: process.env.OPENAI_COMPATIBLE_BASE_URL ?? null,
     settlementNetwork: net.network,
     settlementChainId: net.chainId,
     settlementDryRun: net.dryRun,
@@ -237,6 +308,7 @@ terminal.post("/run", async (c) => {
     buyerId?: string;
     sellerListingId?: string;
     options?: { l1Only?: boolean };
+    compatibleBaseUrl?: string;
   }>();
 
   const apiKey = body.credential?.apiKey ?? (body as { apiKey?: string }).apiKey;
@@ -257,6 +329,7 @@ terminal.post("/run", async (c) => {
     buyerId: body.buyerId,
     sellerListingId: body.sellerListingId,
     l1Only: body.options?.l1Only,
+    compatibleBaseUrl: body.compatibleBaseUrl,
   });
 
   if (!result.ok) {
@@ -299,6 +372,7 @@ terminal.post("/listings/run", async (c) => {
     providerKind?: string;
     claimedModel?: string;
     autoListAfterVerify?: boolean;
+    compatibleBaseUrl?: string;
   }>();
 
   const apiKey = body.credential?.apiKey ?? body.apiKey;
@@ -311,6 +385,8 @@ terminal.post("/listings/run", async (c) => {
     providerKind: body.providerKind,
     claimedModel: body.claimedModel,
     autoListAfterVerify: body.autoListAfterVerify,
+    sellerWallet: walletFromRequest(c),
+    compatibleBaseUrl: body.compatibleBaseUrl,
   });
 
   if (!result.ok) {
@@ -338,6 +414,7 @@ terminal.get("/job/:terminalJobId", (c) => {
     listingId: job.listingId,
     listingStatus: listing?.status,
     events: job.events,
+    error: job.error ?? null,
     snapshotAt: new Date().toISOString(),
   });
 });
@@ -569,6 +646,15 @@ terminal.get("/market/listings", (c) => {
   return c.json({ listings: rows });
 });
 
+terminal.get("/market/my-listings", (c) => {
+  const wallet = walletFromRequest(c);
+  const rows = listingStore
+    .listMine()
+    .filter((l) => !wallet || l.sellerWallet?.toLowerCase() === wallet.toLowerCase())
+    .map((l) => listingStore.toMarketRow(l));
+  return c.json({ listings: rows });
+});
+
 terminal.get("/feed", (c) => c.json({ rows: buildVerifyFeed(100) }));
 
 terminal.get("/metrics/health", async (c) => {
@@ -581,6 +667,7 @@ terminal.get("/metrics/health", async (c) => {
     queue_depth: m.queue_depth,
     success_rate: Number(m.success_rate.toFixed(2)),
     jobs_total: m.jobs_total,
+    avg_tokens_used: m.avg_tokens_used,
     monitor_live: monitor.live,
     monitor_stale: monitor.stale,
     monitor_revoked: monitor.revoked,
@@ -589,6 +676,7 @@ terminal.get("/metrics/health", async (c) => {
     queue_backend: queueBackend(),
     provider_limiter: providerLimiterStats(),
     proofComposition: {
+      connectivityPct: comp.connectivityPct,
       zkProofPct: comp.zkProofPct,
       teeAttestPct: comp.teeAttestPct,
       signaturePct: comp.signaturePct,
@@ -615,6 +703,55 @@ terminal.get("/wallet/summary", (c) => {
   return c.json(buildWalletSummary(wallet));
 });
 
+terminal.get("/wallet/income", (c) => {
+  const wallet = walletFromRequest(c);
+  if (!wallet) return c.json({ error: "X-Wallet-Address required" }, 400);
+  return c.json({ wallet, ...getSellerIncomeSummary(wallet) });
+});
+
+terminal.post("/wallet/deposit", async (c) => {
+  const wallet = walletFromRequest(c);
+  if (!wallet) return c.json({ error: "X-Wallet-Address required" }, 400);
+  const body = await c.req.json<{ amountUsdc: string }>();
+  if (!body.amountUsdc) return c.json({ error: "amountUsdc required" }, 400);
+  const event = depositWallet(wallet, body.amountUsdc);
+  return c.json({ ok: true, event, summary: buildWalletSummary(wallet) }, 201);
+});
+
+terminal.post("/wallet/withdraw", async (c) => {
+  const wallet = walletFromRequest(c);
+  if (!wallet) return c.json({ error: "X-Wallet-Address required" }, 400);
+  const body = await c.req.json<{ amountUsdc: string }>();
+  if (!body.amountUsdc) return c.json({ error: "amountUsdc required" }, 400);
+  const result = withdrawWallet(wallet, body.amountUsdc);
+  if (!result.ok) return c.json({ error: result.error }, 409);
+  return c.json({
+    ok: true,
+    txHash: result.txHash,
+    event: result.event,
+    summary: buildWalletSummary(wallet),
+  });
+});
+
+/**
+ * GET /wallet/treasury
+ * Returns the Tokenta treasury wallet's current balance and recent fee ledger.
+ * In production this would be gated behind an admin auth check.
+ */
+terminal.get("/wallet/treasury", (c) => {
+  const balance = getTreasuryBalance();
+  const lifetime = getTreasuryLifetimeFees();
+  const events = getTreasuryLedger(50);
+  return c.json({
+    treasuryWallet: TREASURY_WALLET,
+    availableUsdc: balance.toFixed(2),
+    lifetimeFeesUsdc: lifetime.toFixed(2),
+    feeBps: PLATFORM_FEE_BPS,
+    feePct: `${PLATFORM_FEE_BPS / 100}%`,
+    recentEvents: events,
+  });
+});
+
 terminal.get("/analytics/overview", (c) => {
   const mode = c.req.query("mode") === "SELL" ? "SELL" : "BUY";
   return c.json(buildAnalyticsOverview(mode));
@@ -624,6 +761,7 @@ terminal.get("/metrics/composition", (c) => {
   const comp = computeProofComposition(jobStore.listJobs());
   return c.json({
     proofComposition: {
+      connectivityPct: comp.connectivityPct,
       zkProofPct: comp.zkProofPct,
       teeAttestPct: comp.teeAttestPct,
       signaturePct: comp.signaturePct,
@@ -638,6 +776,42 @@ terminal.get("/metrics/prometheus", async (c) => {
   return c.text(await renderPrometheusMetrics(), 200, {
     "Content-Type": "text/plain; version=0.0.4; charset=utf-8",
   });
+});
+
+terminal.post("/dev/reset", (c) => {
+  if (process.env["NODE_ENV"] === "production") {
+    return c.json({ error: "not available in production" }, 403);
+  }
+  listingStore.resetForDev();
+  jobStore.resetForDev();
+  return c.json({ cleared: true, at: new Date().toISOString() });
+});
+
+/**
+ * PATCH /listings/:listingId/price
+ * Allows a seller to update the ask price on their LIVE listing.
+ * Only the wallet that created the listing may change the price.
+ */
+terminal.patch("/listings/:listingId/price", async (c) => {
+  const listingId = c.req.param("listingId");
+  const body = await c.req.json<{ askPriceUsdc: number }>().catch(() => null);
+  if (!body || typeof body.askPriceUsdc !== "number") {
+    return c.json({ error: "askPriceUsdc (number) required" }, 400);
+  }
+  const requestingWallet = walletFromRequest(c);
+  const result = listingStore.updatePrice(listingId, body.askPriceUsdc, requestingWallet);
+  if ("error" in result) {
+    const status =
+      result.code === "NOT_FOUND"
+        ? 404
+        : result.code === "FORBIDDEN"
+          ? 403
+          : result.code === "INVALID_PRICE" || result.code === "INVALID_LISTING_STATE"
+            ? 409
+            : 400;
+    return c.json({ error: result.error, code: result.code }, status);
+  }
+  return c.json({ listing: listingStore.toMarketRow(result), listingId, askPriceUsdc: result.askPriceUsdc });
 });
 
 terminal.post("/listings/:listingId/bind-verification", async (c) => {
@@ -660,6 +834,26 @@ terminal.post("/listings/:listingId/bind-verification", async (c) => {
   return c.json({ listing: updated, proofHash: job.proof.proofHash });
 });
 
+terminal.post("/listings/:listingId/publish", async (c) => {
+  const listingId = c.req.param("listingId");
+  const listing = listingStore.get(listingId);
+  if (!listing) return c.json({ error: "listing not found" }, 404);
+  if (listing.status !== "VERIFIED_PENDING_PUBLISH") {
+    return c.json(
+      {
+        error: "listing not in VERIFIED_PENDING_PUBLISH state",
+        currentStatus: listing.status,
+        code: "INVALID_LISTING_STATE",
+      },
+      409,
+    );
+  }
+  const updated = listingStore.publishListing(listingId);
+  if (!updated) return c.json({ error: "publish failed" }, 500);
+  recordAudit({ type: "LISTING_PUBLISHED", listingId });
+  return c.json({ listing: updated, listingId, status: "LIVE" });
+});
+
 terminal.post("/sign/bind", async (c) => {
   const body = await c.req.json<{ listingId: string; jobId: string }>();
   if (!body.listingId || !body.jobId) {
@@ -676,6 +870,10 @@ terminal.post("/sign/escrow", async (c) => {
   return c.json({
     signature: signEscrowPayload(body.orderId, body.amountUsdc, body.action),
   });
+});
+
+terminal.get("/buyback/offers", (c) => {
+  return c.json({ offers: BUYBACK_OFFERS });
 });
 
 terminal.post("/buyback/confirm", async (c) => {
@@ -738,12 +936,24 @@ terminal.post("/orders/purchase", async (c) => {
   const listing = listingStore.get(body.listingId);
   if (!listing) return c.json({ error: "listing not found" }, 404);
 
+  const mode = body.mode ?? "BUYOUT";
+  const quantity = Number(body.quantity ?? listing.quotaToSell);
+  const amountUsdc =
+    body.amountUsdc ??
+    computeOrderAmountUsdc({
+      askPriceUsdc: listing.askPriceUsdc,
+      quotaToSell: listing.quotaToSell,
+      mode,
+      quantity,
+    });
+
   const order = createTerminalOrder({
     listingId: body.listingId,
+    sellerWallet: listing.sellerWallet ?? null,
     buyerWallet: walletFromRequest(c),
-    mode: body.mode ?? "BUYOUT",
-    quantity: Number(body.quantity ?? listing.quotaToSell),
-    amountUsdc: String(body.amountUsdc ?? listing.askPriceUsdc),
+    mode,
+    quantity,
+    amountUsdc: String(amountUsdc),
   });
   seedOrderRoomSystemMessage(
     order.orderId,
@@ -762,11 +972,11 @@ terminal.post("/orders/purchase", async (c) => {
 });
 
 terminal.get("/orders", (c) => {
-  const wallet = c.req.query("wallet");
+  const wallet = c.req.query("wallet") ?? walletFromRequest(c) ?? undefined;
+  const role = c.req.query("role") as "buyer" | "seller" | "all" | undefined;
   const limit = Number(c.req.query("limit") ?? 100);
-  const rows = listTerminalOrders(limit);
-  const filtered = wallet ? rows.filter((o) => o.buyerWallet?.toLowerCase() === wallet.toLowerCase()) : rows;
-  return c.json({ orders: filtered });
+  const rows = listTerminalOrders(limit, { wallet, role: role ?? "all" });
+  return c.json({ orders: rows });
 });
 
 terminal.get("/orders/:orderId", (c) => {
@@ -804,28 +1014,109 @@ terminal.post("/orders/:orderId/messages", async (c) => {
 
 terminal.post("/orders/:orderId/escrow/fund", async (c) => {
   const orderId = c.req.param("orderId");
-  const body = await c.req.json<{ amountUsdc: string; signature?: string }>();
+  const body = await c.req.json<{
+    amountUsdc: string;
+    signature?: string;
+    /** When provided, indicates the buyer has already transferred USDC on-chain.
+     * The ledger debit is skipped and this hash is persisted as fundTxHash. */
+    txHash?: string;
+  }>();
   if (!body.amountUsdc) return c.json({ error: "amountUsdc required" }, 400);
-  const result = fundEscrow(orderId, body.amountUsdc, body.signature);
+
+  // Pass the buyer wallet so the ledger can debit their balance.
+  const buyerWallet = walletFromRequest(c);
+
+  if (body.txHash) {
+    const verification = await verifyEscrowFundTx({
+      txHash: body.txHash,
+      expectedAmountUsdc: body.amountUsdc,
+      expectedFrom: buyerWallet,
+    });
+    const strict = process.env.REQUIRE_ONCHAIN_FUND_VERIFY === "true";
+    if (!verification.ok && strict) {
+      return c.json(
+        { error: verification.error ?? "on-chain fund verification failed", code: "FUND_TX_INVALID" },
+        400,
+      );
+    }
+  }
+
+  const result = fundEscrow(
+    orderId,
+    body.amountUsdc,
+    body.signature,
+    buyerWallet,
+    body.txHash,
+  );
   if (!result.ok) {
-    return c.json({ error: result.error, code: result.code }, result.code === "ESCROW_SIGNATURE_INVALID" ? 401 : 409);
+    const statusCode =
+      result.code === "ESCROW_SIGNATURE_INVALID"
+        ? 401
+        : result.code === "INSUFFICIENT_BALANCE"
+          ? 402
+          : 409;
+    return c.json({ error: result.error, code: result.code }, statusCode);
   }
   updateTerminalOrderStatus(orderId, "ESCROW_FUNDED");
-  seedOrderRoomSystemMessage(orderId, `Escrow funded: ${body.amountUsdc} USDC.`);
-  return c.json({ escrow: result.record }, 201);
+  const fundNote = body.txHash
+    ? ` On-chain fund tx ${body.txHash.slice(0, 14)}… confirmed to escrow ${ESCROW_WALLET.slice(0, 10)}…`
+    : "";
+  seedOrderRoomSystemMessage(
+    orderId,
+    `Escrow funded: ${body.amountUsdc} USDC. Payment locked — awaiting API delivery and buyer confirmation.${fundNote}`,
+  );
+  return c.json(
+    {
+      escrow: result.record,
+      settlement: {
+        escrowWallet: ESCROW_WALLET,
+        fundTxHash: result.record?.fundTxHash,
+        mode: body.txHash ? "on-chain-fund" : "ledger-fund",
+      },
+    },
+    201,
+  );
 });
 
 terminal.post("/orders/:orderId/escrow/release", async (c) => {
   const orderId = c.req.param("orderId");
   const body = await c.req.json<{ amountUsdc: string; signature?: string }>();
   if (!body.amountUsdc) return c.json({ error: "amountUsdc required" }, 400);
+
+  let payout: Awaited<ReturnType<typeof settleSellerPayout>> | null = null;
+  try {
+    payout = await settleSellerPayout(orderId);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : "settlement failed";
+    return c.json({ error: message, code: "ON_CHAIN_RELEASE_FAILED" }, 502);
+  }
+
   const result = releaseEscrow(orderId, body.amountUsdc, body.signature);
   if (!result.ok) {
     return c.json({ error: result.error, code: result.code }, result.code === "ESCROW_SIGNATURE_INVALID" ? 401 : 409);
   }
   updateTerminalOrderStatus(orderId, "SETTLED");
-  seedOrderRoomSystemMessage(orderId, `Escrow released: ${body.amountUsdc} USDC.`);
-  return c.json({ escrow: result.record });
+  const feePct = `${PLATFORM_FEE_BPS / 100}%`;
+  const payoutMsg = payout
+    ? ` Seller credited ${payout.netUsdc} USDC (${feePct} fee: ${payout.feeUsdc} USDC to treasury).`
+    : "";
+  const onChainNote =
+    payout?.onChainMode === "on-chain" && payout.payoutTxHash
+      ? ` Seller tx: ${payout.payoutTxHash.slice(0, 14)}… · Treasury tx: ${payout.treasuryTxHash?.slice(0, 14) ?? "—"}…`
+      : "";
+  seedOrderRoomSystemMessage(orderId, `Escrow released: ${body.amountUsdc} USDC.${payoutMsg}${onChainNote}`);
+  return c.json({
+    escrow: result.record,
+    sellerPayout: payout,
+    fee: { bps: PLATFORM_FEE_BPS, pct: feePct, treasury: TREASURY_WALLET },
+    settlement: {
+      escrowWallet: ESCROW_WALLET,
+      treasuryWallet: CONFIG_TREASURY_WALLET,
+      mode: payout?.onChainMode ?? "ledger-only",
+      sellerTxHash: payout?.payoutTxHash,
+      treasuryTxHash: payout?.treasuryTxHash,
+    },
+  });
 });
 
 terminal.post("/orders/:orderId/actions/:action", async (c) => {
@@ -838,13 +1129,32 @@ terminal.post("/orders/:orderId/actions/:action", async (c) => {
   if (action === "release-escrow") {
     const amountUsdc = body.amountUsdc ?? "0.00";
     const sig = signEscrowPayload(orderId, amountUsdc, "release");
+    let payout: Awaited<ReturnType<typeof settleSellerPayout>> | null = null;
+    try {
+      payout = await settleSellerPayout(orderId);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "settlement failed";
+      return c.json({ error: message, code: "ON_CHAIN_RELEASE_FAILED" }, 502);
+    }
     const released = releaseEscrow(orderId, amountUsdc, sig);
     if (!released.ok) {
       return c.json({ error: released.error, code: released.code }, 409);
     }
     updateTerminalOrderStatus(orderId, "SETTLED");
-    const message = seedOrderRoomSystemMessage(orderId, `Escrow released by action API (${amountUsdc} USDC).`);
-    return c.json({ action, ok: true, escrow: released.record, message });
+    const feePct = `${PLATFORM_FEE_BPS / 100}%`;
+    const message = seedOrderRoomSystemMessage(
+      orderId,
+      `Escrow released (${amountUsdc} USDC).${
+        payout
+          ? ` Seller credited ${payout.netUsdc} USDC; ${feePct} fee (${payout.feeUsdc} USDC) → Tokenta treasury.`
+          : ""
+      }`,
+    );
+    return c.json({
+      action, ok: true, escrow: released.record, sellerPayout: payout,
+      fee: { bps: PLATFORM_FEE_BPS, pct: feePct, treasury: TREASURY_WALLET },
+      message,
+    });
   }
 
   if (action === "run-reverify") {

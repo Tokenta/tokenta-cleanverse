@@ -9,6 +9,7 @@ export interface ProofCompositionBuckets {
   teeAttestPct: number;
   signaturePct: number;
   quotaChkPct: number;
+  connectivityPct: number;
   throughputPerSec: number;
 }
 
@@ -20,6 +21,7 @@ export interface ProofCompositionRow {
 }
 
 const LABELS: Record<keyof Omit<ProofCompositionBuckets, "throughputPerSec">, string> = {
+  connectivityPct: "Connectivity (L1)",
   zkProofPct: "ZK-PROOF (Compute)",
   teeAttestPct: "TEE Attestation",
   signaturePct: "Signature Chain",
@@ -27,11 +29,11 @@ const LABELS: Record<keyof Omit<ProofCompositionBuckets, "throughputPerSec">, st
 };
 
 function bucketForParadigm(paradigm: string): keyof Omit<ProofCompositionBuckets, "throughputPerSec"> {
+  if (paradigm === "A" || paradigm === "G") return "connectivityPct";
   if (paradigm === "L5" || paradigm === "ZK") return "zkProofPct";
   if (paradigm === "TEE") return "teeAttestPct";
   if (paradigm === "F") return "signaturePct";
   if (paradigm === "C") return "quotaChkPct";
-  if (paradigm === "A" || paradigm === "G") return "teeAttestPct";
   return "signaturePct";
 }
 
@@ -40,7 +42,13 @@ export function computeProofComposition(
   windowMs = 3600_000,
 ): ProofCompositionBuckets & { rows: ProofCompositionRow[] } {
   const cutoff = Date.now() - windowMs;
-  const counts = { zkProofPct: 0, teeAttestPct: 0, signaturePct: 0, quotaChkPct: 0 };
+  const counts = {
+    connectivityPct: 0,
+    zkProofPct: 0,
+    teeAttestPct: 0,
+    signaturePct: 0,
+    quotaChkPct: 0,
+  };
   let finishedInWindow = 0;
 
   for (const job of jobs) {
@@ -59,6 +67,7 @@ export function computeProofComposition(
   const pct = (n: number) => (total > 0 ? Math.round((n / total) * 100) : 0);
 
   const buckets: ProofCompositionBuckets = {
+    connectivityPct: pct(counts.connectivityPct),
     zkProofPct: pct(counts.zkProofPct),
     teeAttestPct: pct(counts.teeAttestPct),
     signaturePct: pct(counts.signaturePct),

@@ -1,13 +1,8 @@
-import { PrismaClient } from "@prisma/client";
-
-let client: PrismaClient | null = null;
-
+/** Database layer removed — Terminal persists via in-memory stores only. */
 export function isDbPersistenceEnabled(): boolean {
-  return process.env.USE_DB_PERSISTENCE === "true" && !!process.env.DATABASE_URL;
+  return false;
 }
 
-export function getPrisma(): PrismaClient | null {
-  if (!isDbPersistenceEnabled()) return null;
-  if (!client) client = new PrismaClient();
-  return client;
+export function getPrisma(): null {
+  return null;
 }

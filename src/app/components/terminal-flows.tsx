@@ -2,27 +2,37 @@ import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   X, ShieldCheck, Lock, ArrowUpRight, ArrowDownRight, ChevronRight,
-  MessagesSquare, Activity, KeyRound, Check,
+  MessagesSquare, Activity, KeyRound, Check, ClipboardPaste,
 } from "lucide-react";
 import type { TradingMode } from "../trading-types";
 import { useTokentaWallet } from "../hooks/useTokentaWallet";
 import { useAuth } from "../auth/AuthContext";
+import { useTerminalToast } from "../context/TerminalToastContext";
 type Role = TradingMode;
-import { orders, verifyFeed } from "./tokenta-data";
+import { rotationGuide } from "../market-utils";
+import { AiProviderSelect } from "./AiProviderSelect";
 import {
   purchaseListingTerminal,
+  computePurchaseAmountUsdc,
   confirmTokentaBuyback,
+  createListing,
   createPrePurchaseVerification,
   createVerificationJob,
   fetchOrderVerificationTrail,
   fetchProofAnchor,
+  fetchTerminalOrder,
+  fetchTerminalOrderEscrow,
   fetchTerminalReceipt,
   fetchVerificationProof,
+  fundOrderEscrow,
   proofDownloadUrl,
+  releaseOrderEscrow,
+  signEscrowPayloadDev,
   submitTerminalAnchor,
   fetchTerminalNetwork,
   explorerTxUrl,
   type ProofAnchorStatus,
+  type TerminalOrderRow,
   type VerificationProof,
   type VerificationTrailEntry,
 } from "../api/verification";
@@ -132,6 +142,87 @@ function FlowField({
   );
 }
 
+function ApiKeyField({
+  label,
+  value,
+  onChange,
+  placeholder,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+}) {
+  const [pasteMsg, setPasteMsg] = useState<string | null>(null);
+
+  const sanitize = (raw: string): { clean: string; dropped: number } => {
+    const trimmed = raw.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+    const ascii = Array.from(trimmed).filter((ch) => {
+      const code = ch.charCodeAt(0);
+      return code >= 0x21 && code <= 0x7e;
+    });
+    return { clean: ascii.join(""), dropped: trimmed.length - ascii.length };
+  };
+
+  const apply = (raw: string) => {
+    const { clean, dropped } = sanitize(raw);
+    onChange(clean);
+    if (dropped > 0) {
+      setPasteMsg(`Stripped ${dropped} non-ASCII character${dropped === 1 ? "" : "s"} (likely pasted text or hidden whitespace).`);
+    } else {
+      setPasteMsg(null);
+    }
+  };
+
+  const onPaste = async () => {
+    setPasteMsg(null);
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text.trim()) {
+        setPasteMsg("Clipboard is empty");
+        return;
+      }
+      apply(text);
+    } catch {
+      setPasteMsg("Could not read clipboard — paste manually (Ctrl+V)");
+    }
+  };
+
+  return (
+    <div className="border border-white/20 px-2 py-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[9px] tracking-[0.2em] text-white/40">{label}</div>
+        <button
+          type="button"
+          onClick={() => void onPaste()}
+          className="flex shrink-0 items-center gap-1 border border-white/25 px-2 py-0.5 text-[9px] tracking-[0.16em] text-white/60 hover:border-white hover:text-white"
+        >
+          <ClipboardPaste className="h-3 w-3" /> PASTE
+        </button>
+      </div>
+      <div className="mt-0.5">
+        <input
+          type="password"
+          value={value}
+          placeholder={placeholder}
+          onChange={(e) => apply(e.target.value)}
+          onPaste={(e) => {
+            const text = e.clipboardData?.getData("text") ?? "";
+            if (text) {
+              e.preventDefault();
+              apply(text);
+            }
+          }}
+          className="w-full bg-transparent text-[11px] tabular-nums outline-none placeholder:text-white/25"
+          autoComplete="off"
+          spellCheck={false}
+        />
+      </div>
+      {pasteMsg && <p className="mt-1 text-[9px] text-white/45">{pasteMsg}</p>}
+    </div>
+  );
+}
+
 function CheckRow({
   checked,
   onChange,
@@ -168,42 +259,58 @@ export function ListApiModal({
 }: {
   open: boolean;
   onClose: () => void;
-  onSubmitted: (jobId: string, listingId: string) => void;
+  onSubmitted: (
+    jobId: string,
+    listingId: string,
+    snapshot: { quotaToSell: number; askPriceUsdc: number; providerKind: string },
+  ) => void;
 }) {
   const { requireAuth } = useAuth();
-  const [provider, setProvider] = useState("OpenAI-compatible");
+  const { showToast } = useTerminalToast();
+  const [provider, setProvider] = useState("deepseek");
+  const [compatibleBaseUrl, setCompatibleBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [quota, setQuota] = useState("5000000");
   const [price, setPrice] = useState("0.002");
   const [verifyConsent, setVerifyConsent] = useState(false);
-  const [autoList, setAutoList] = useState(true);
+  const [autoList, setAutoList] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const declaredNum = Number(quota.replace(/,/g, "")) || 0;
   const consentCeiling = Math.min(Math.ceil(declaredNum * 0.03), 5000);
 
-  const canSubmit = apiKey.length >= 8 && verifyConsent && !submitting;
+  const canSubmit =
+    apiKey.length >= 8 &&
+    verifyConsent &&
+    !submitting &&
+    (provider !== "openai-compatible" && provider !== "custom" || compatibleBaseUrl.trim().length > 8);
 
   const handleSubmit = async () => {
     if (!canSubmit) return;
     if (!requireAuth("Listing an API for sale")) return;
     setSubmitting(true);
-    setSubmitError(null);
     try {
-      const { jobId, listingId } = await createListing({
+      const res = await createListing({
         apiKey,
         quotaToSell: declaredNum,
         askPriceUsdc: Number(price),
         providerKind: provider,
-        claimedModel: "gpt-4o-mini",
+        compatibleBaseUrl: compatibleBaseUrl || undefined,
         autoListAfterVerify: autoList,
       });
-      onSubmitted(jobId, listingId);
+      onSubmitted(res.terminalJobId ?? res.jobId, res.listingId, {
+        quotaToSell: declaredNum,
+        askPriceUsdc: Number(price),
+        providerKind: provider,
+      });
       onClose();
       setApiKey("");
     } catch (e) {
-      setSubmitError(e instanceof Error ? e.message : "Verification failed to start");
+      showToast({
+        title: "LISTING FAILED",
+        message: e instanceof Error ? e.message : "Verification failed to start",
+        kind: "error",
+      });
     } finally {
       setSubmitting(false);
     }
@@ -218,31 +325,35 @@ export function ListApiModal({
               <div className="mb-2 flex items-center gap-2 text-[10px] tracking-[0.22em] text-white/40">
                 <KeyRound className="h-3.5 w-3.5" /> SELLER ONBOARDING
               </div>
-              Paste your API key and authorize a small controlled capacity sample (typically 25–75 tokens).
-              Tokenta infers execution capacity — not your exact remaining balance.
+              Select your provider, paste your API key, and set quota and price. Tokenta picks the default probe model for that provider — no manual model entry.
             </div>
 
-            <div>
-              <div className="mb-1.5 text-[9px] tracking-[0.2em] text-white/40">API PROVIDER</div>
-              <select
-                value={provider}
-                onChange={(e) => setProvider(e.target.value)}
-                className="w-full border border-white/20 bg-black px-2 py-2 text-[11px] outline-none focus:border-white"
-              >
-                <option>OpenAI-compatible</option>
-                <option>Anthropic</option>
-                <option>Google AI</option>
-                <option>Custom REST endpoint</option>
-              </select>
-            </div>
 
-            <FlowField
+            <AiProviderSelect
+              value={provider}
+              onChange={setProvider}
+              compatibleBaseUrl={compatibleBaseUrl}
+              onCompatibleBaseUrlChange={setCompatibleBaseUrl}
+            />
+
+            {provider === "deepseek" && (
+              <div className="border border-white/20 bg-white/[0.03] p-2 text-[10px] leading-relaxed text-white/50">
+                DeepSeek probes call <span className="text-white">https://api.deepseek.com</span>. If you see a network error, check VPN/firewall or corporate proxy (HTTPS_PROXY on the server).
+              </div>
+            )}
+
+            <ApiKeyField
               label="API KEY"
-              type="password"
               value={apiKey}
               onChange={setApiKey}
-              placeholder="sk-••••••••••••••••"
+              placeholder="Paste your provider API key (sk-... or sk-mock-... for demo)"
             />
+
+            {apiKey.startsWith("sk-mock") && (
+              <div className="border border-amber-400/40 bg-amber-400/[0.05] p-2 text-[10px] tracking-[0.04em] text-amber-200/80">
+                Mock key detected. The pipeline will run a simulated probe (no real provider call) and likely return DEGRADED so this listing will not publish.
+              </div>
+            )}
 
             <div className="grid grid-cols-2 gap-2">
               <FlowField label="QUOTA TO SELL" value={quota} onChange={setQuota} suffix="tokens" />
@@ -264,10 +375,6 @@ export function ListApiModal({
               I authorize Tokenta controlled sampling on my API key (typically under 100 tokens; ceiling{" "}
               {consentCeiling.toLocaleString()} tokens). I understand this checks capacity, not exact balance.
             </CheckRow>
-
-            {submitError && (
-              <p className="text-[11px] text-red-400 border border-red-400/30 px-2 py-1">{submitError}</p>
-            )}
 
             <CheckRow checked={autoList} onChange={setAutoList}>
               After verification passes, automatically publish any remaining surplus quota at my ask price.
@@ -299,15 +406,38 @@ export function BuyApiModal({
 }: {
   open: boolean;
   onClose: () => void;
-  asset: Asset;
+  asset: Asset | null;
   onPurchased: (orderId: string) => void;
 }) {
   const { shortAddress, authenticated, login } = useTokentaWallet();
   const { requireAuth } = useAuth();
+  const { showToast } = useTerminalToast();
   const [mode, setMode] = useState<"BUYOUT" | "PARTIAL">("BUYOUT");
   const [qty, setQty] = useState("2500000");
+  const [purchasing, setPurchasing] = useState(false);
 
-  const estTotal = mode === "BUYOUT" ? "Full listing" : `${(parseFloat(qty || "0") * parseFloat(asset.price) / 1_000_000).toFixed(2)} USDC`;
+  if (!asset) {
+    return (
+      <AnimatePresence>
+        {open && (
+          <ModalShell open={open} onClose={onClose} code="BY.1" title="Buy Verified API">
+            <p className="p-4 text-[11px] text-white/50">Select a live listing from the market first.</p>
+          </ModalShell>
+        )}
+      </AnimatePresence>
+    );
+  }
+
+  const supplyNum = Number(String(asset.supply).replace(/,/g, "")) || 1_000_000;
+  const priceNum = parseFloat(asset.price) || 0;
+  const qtyNum = Number(qty.replace(/,/g, "")) || 0;
+  const estTotalUsdc = computePurchaseAmountUsdc({
+    askPriceUsdc: priceNum,
+    supplyTokens: supplyNum,
+    mode,
+    quantity: qtyNum,
+  });
+  const estTotal = `${estTotalUsdc} USDC`;
 
   return (
     <AnimatePresence>
@@ -333,9 +463,26 @@ export function BuyApiModal({
               {authenticated ? `WALLET ${shortAddress} · CONNECTED` : "WALLET NOT CONNECTED"}
             </div>
 
-            <p className="text-[11px] leading-relaxed text-white/60">
-              This listing passed Tokenta verification. Funds lock in escrow until delivery and final proof complete.
-            </p>
+            {/* P2P escrow flow — 4 steps */}
+            <div className="border border-white/15 bg-white/[0.02] px-3 py-2 text-[9px] tracking-[0.1em] text-white/50">
+              <div className="mb-1.5 text-[8px] tracking-[0.2em] text-white/30">P2P ESCROW FLOW</div>
+              <ol className="space-y-1">
+                {[
+                  ["1", "Lock payment", "Your funds held by Tokenta escrow — seller cannot access yet"],
+                  ["2", "Receive API access", "Order confirmed; API credentials provisioned to you"],
+                  ["3", "Confirm it works", "You verify the API is functional within the agreed window"],
+                  ["4", "Funds released", "Tokenta releases escrow to seller only after your confirmation"],
+                ].map(([n, title, desc]) => (
+                  <li key={n} className="flex gap-2">
+                    <span className="shrink-0 text-white/30">{n}.</span>
+                    <span>
+                      <span className="text-white/70">{title} · </span>
+                      {desc}
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            </div>
 
             <div className="flex border border-white/30 text-[10px] tracking-[0.2em]">
               <button
@@ -359,33 +506,55 @@ export function BuyApiModal({
             )}
 
             <div className="flex justify-between border-t border-white/10 pt-2 text-[11px]">
-              <span className="text-white/40 tracking-[0.16em]">EST. TOTAL</span>
+              <span className="text-white/40 tracking-[0.16em]">EST. TOTAL (YOU PAY)</span>
               <span className="tabular-nums">{estTotal}</span>
+            </div>
+            <div className="flex justify-between text-[10px] text-white/40">
+              <span className="tracking-[0.14em]">SELLER RECEIVES (AFTER 3% FEE)</span>
+              <span className="tabular-nums">{(Number(estTotalUsdc) * 0.97).toFixed(2)} USDC</span>
+            </div>
+            <div className="text-[9px] text-white/30 tracking-[0.1em]">
+              TOKENTA PLATFORM FEE: 3% · CHARGED TO SELLER ONLY · CREDITED TO TREASURY ON RELEASE
             </div>
 
             <button
               type="button"
+              disabled={purchasing}
               onClick={async () => {
                 if (!requireAuth("Purchasing verified API access")) return;
-                const listingId = asset.listingId;
-                if (listingId) {
+                const listingId = asset.listingId ?? asset.id;
+                if (!listingId) {
+                  showToast({
+                    title: "PURCHASE FAILED",
+                    message: "Listing not available for purchase",
+                    kind: "error",
+                  });
+                  return;
+                }
+                setPurchasing(true);
+                try {
                   const purchase = await purchaseListingTerminal({
                     listingId,
                     mode,
-                    quantity: mode === "PARTIAL" ? Number(qty.replace(/,/g, "")) : undefined,
+                    quantity: mode === "PARTIAL" ? qtyNum : undefined,
+                    amountUsdc: estTotalUsdc,
                   });
-                  if (purchase?.orderId) {
-                    onPurchased(purchase.orderId);
-                    onClose();
-                    return;
-                  }
+                  onPurchased(purchase.orderId);
+                  onClose();
+                } catch (e) {
+                  showToast({
+                    title: "PURCHASE FAILED",
+                    message: e instanceof Error ? e.message : "Purchase failed",
+                    kind: "error",
+                  });
+                } finally {
+                  setPurchasing(false);
                 }
-                onPurchased("ORD-78214");
-                onClose();
               }}
-              className="flex w-full items-center justify-center gap-2 border border-white bg-white py-2.5 text-[11px] tracking-[0.24em] text-black hover:bg-white/90"
+              className="flex w-full items-center justify-center gap-2 border border-white bg-white py-2.5 text-[11px] tracking-[0.24em] text-black hover:bg-white/90 disabled:opacity-40"
             >
-              <ArrowDownRight className="h-3.5 w-3.5" /> BUY VERIFIED API · LOCK ESCROW
+              <ArrowDownRight className="h-3.5 w-3.5" />{" "}
+              {purchasing ? "CREATING ORDER…" : "BUY VERIFIED API · LOCK ESCROW"}
             </button>
           </div>
         </ModalShell>
@@ -435,13 +604,61 @@ export function MarketActionBanner({
 
 /* ---------------- order detail ---------------- */
 
+type OrderDisplay = {
+  id: string;
+  side: string;
+  asset: string;
+  qty: string;
+  price: string;
+  value: string;
+  escrow: string;
+  status: string;
+  counterparty: string;
+  amountUsdc: string;
+  apiStatus?: string;
+};
+
+function orderRowToDisplay(o: TerminalOrderRow, mode: Role): OrderDisplay {
+  const escrow =
+    o.status === "SETTLED"
+      ? "RELEASED"
+      : o.status === "ESCROW_FUNDED"
+        ? "FUNDED"
+        : "PENDING";
+  return {
+    id: o.orderId,
+    side: mode === "SELL" ? "SELL" : "BUY",
+    asset: `LST-${o.listingId.slice(-6).toUpperCase()}`,
+    qty: String(o.quantity),
+    price: o.amountUsdc,
+    value: o.amountUsdc,
+    escrow,
+    status:
+      o.status === "SETTLED"
+        ? "SETTLED"
+        : o.status === "ESCROW_FUNDED"
+          ? "VERIFYING"
+          : "MATCHING",
+    counterparty:
+      mode === "SELL"
+        ? o.buyerWallet
+          ? `${o.buyerWallet.slice(0, 8)}…`
+          : "—"
+        : o.sellerWallet
+          ? `${o.sellerWallet.slice(0, 8)}…`
+          : "—",
+    amountUsdc: o.amountUsdc,
+    apiStatus: o.status,
+  };
+}
+
 export function OrderDetailView({
   orderId,
   mode,
   onBack,
   onOpenChat,
   onOpenVerify,
-  onBuyAgain,
+  onOpenEscrow,
   onRequestPrePurchase,
   activeJobId,
 }: {
@@ -450,11 +667,100 @@ export function OrderDetailView({
   onBack: () => void;
   onOpenChat: () => void;
   onOpenVerify: () => void;
-  onBuyAgain?: () => void;
+  onOpenEscrow?: () => void;
   onRequestPrePurchase?: () => void;
   activeJobId?: string | null;
 }) {
-  const order = orders.find((o) => o.id === orderId) ?? orders[0];
+  const { showToast } = useTerminalToast();
+  const [apiOrder, setApiOrder] = useState<TerminalOrderRow | null>(null);
+  const [escrowStatus, setEscrowStatus] = useState<string | null>(null);
+  const [paymentMsg, setPaymentMsg] = useState<string | null>(null);
+  const [paymentBusy, setPaymentBusy] = useState(false);
+
+  const order: OrderDisplay = apiOrder
+    ? orderRowToDisplay(apiOrder, mode)
+    : {
+        id: orderId,
+        side: mode,
+        asset: "—",
+        qty: "—",
+        price: "—",
+        value: "—",
+        escrow: "PENDING",
+        status: "MATCHING",
+        counterparty: "—",
+        amountUsdc: "0",
+      };
+
+  useEffect(() => {
+    if (!orderId.startsWith("ord_")) return;
+    void fetchTerminalOrder(orderId).then(setApiOrder);
+    void fetchTerminalOrderEscrow(orderId).then((e) => {
+      if (e?.status && e.status !== "NOT_FOUND") setEscrowStatus(e.status);
+    });
+  }, [orderId]);
+
+  const pending =
+    apiOrder?.status === "PENDING_ESCROW" || escrowStatus === "PENDING" || !escrowStatus;
+  const funded = escrowStatus === "FUNDED" || apiOrder?.status === "ESCROW_FUNDED";
+  const settled = escrowStatus === "RELEASED" || apiOrder?.status === "SETTLED";
+
+  const runFund = async () => {
+    if (!orderId.startsWith("ord_")) return;
+    setPaymentBusy(true);
+    setPaymentMsg(null);
+    try {
+      const sig = await signEscrowPayloadDev({
+        orderId,
+        amountUsdc: order.amountUsdc,
+        action: "fund",
+      });
+      const res = await fundOrderEscrow(orderId, order.amountUsdc, sig?.signature);
+      if (!res) throw new Error("Fund escrow failed");
+      setEscrowStatus(res.escrow.status);
+      setPaymentMsg("Escrow funded");
+      onOpenEscrow?.();
+    } catch (e) {
+      showToast({
+        title: "FUND ESCROW FAILED",
+        message: e instanceof Error ? e.message : "Fund failed",
+        kind: "error",
+      });
+    } finally {
+      setPaymentBusy(false);
+    }
+  };
+
+  const runRelease = async () => {
+    if (!orderId.startsWith("ord_")) return;
+    setPaymentBusy(true);
+    setPaymentMsg(null);
+    try {
+      const sig = await signEscrowPayloadDev({
+        orderId,
+        amountUsdc: order.amountUsdc,
+        action: "release",
+      });
+      const res = await releaseOrderEscrow(orderId, order.amountUsdc, sig?.signature);
+      if (!res) throw new Error("Release failed");
+      setEscrowStatus(res.escrow.status);
+      const payout = res.sellerPayout;
+      setPaymentMsg(
+        payout
+          ? `Released · seller credited ${payout.netUsdc} USDC`
+          : "Escrow released",
+      );
+      void fetchTerminalOrder(orderId).then(setApiOrder);
+    } catch (e) {
+      showToast({
+        title: "RELEASE FAILED",
+        message: e instanceof Error ? e.message : "Release failed",
+        kind: "error",
+      });
+    } finally {
+      setPaymentBusy(false);
+    }
+  };
   const [trail, setTrail] = useState<VerificationTrailEntry[]>([]);
   const [disputeProof, setDisputeProof] = useState<VerificationProof | null>(null);
   const [proofAnchorStatus, setProofAnchorStatus] = useState<ProofAnchorStatus | null>(null);
@@ -466,8 +772,6 @@ export function OrderDetailView({
     anchorTx?: string | null;
     estimatedUsdc?: string;
   } | null>(null);
-  const relatedVerify = verifyFeed.filter((v) => v.asset === order.asset).slice(0, 5);
-
   useEffect(() => {
     void fetchTerminalNetwork().then((n) => {
       if (n) setNetworkDryRun(n.dryRun);
@@ -575,16 +879,13 @@ export function OrderDetailView({
                     <td className="px-2 py-1.5 font-mono text-[9px]">{v.proofHash.slice(0, 12)}…</td>
                   </tr>
                 ))}
-                {!trail.length &&
-                  relatedVerify.map((v, i) => (
-                    <tr key={i} className="border-b border-white/5">
-                      <td className="px-2 py-1.5 tabular-nums text-white/60">{v.ts}</td>
-                      <td className="px-2 py-1.5">MOCK</td>
-                      <td className="px-2 py-1.5">{v.result}</td>
-                      <td className="px-2 py-1.5">—</td>
-                      <td className="px-2 py-1.5 tabular-nums">{v.latency}</td>
-                    </tr>
-                  ))}
+                {!trail.length && (
+                  <tr>
+                    <td colSpan={5} className="px-2 py-4 text-center text-white/40">
+                      No verification events for this order yet.
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
             {disputeProof && (
@@ -651,13 +952,40 @@ export function OrderDetailView({
           <div className="border-b border-white/15 p-4">
             <div className="text-[10px] tracking-[0.22em] text-white/40">ACTIONS</div>
             <motion.div className="mt-3 space-y-2">
-              {mode === "BUY" && order.status !== "SETTLED" && (
+              {paymentMsg && <p className="text-[10px] text-white/60">{paymentMsg}</p>}
+              {mode === "BUY" && pending && orderId.startsWith("ord_") && (
                 <button
                   type="button"
-                  onClick={onBuyAgain}
-                  className="flex w-full items-center justify-between border border-white bg-white px-3 py-2 text-left text-[10px] tracking-[0.18em] text-black"
+                  disabled={paymentBusy}
+                  onClick={() => void runFund()}
+                  className="flex w-full items-center justify-between border border-white bg-white px-3 py-2 text-left text-[10px] tracking-[0.18em] text-black disabled:opacity-40"
                 >
-                  COMPLETE PURCHASE <ChevronRight className="h-3 w-3" />
+                  {paymentBusy ? "FUNDING…" : "FUND ESCROW · COMPLETE PURCHASE"}
+                  <ChevronRight className="h-3 w-3" />
+                </button>
+              )}
+              {mode === "BUY" && !settled && !pending && onOpenEscrow && (
+                <button
+                  type="button"
+                  onClick={onOpenEscrow}
+                  className="flex w-full items-center justify-between border border-white/30 px-3 py-2 text-left text-[10px] tracking-[0.18em] hover:bg-white hover:text-black"
+                >
+                  OPEN ESCROW PANEL <ChevronRight className="h-3 w-3" />
+                </button>
+              )}
+              {funded && !settled && orderId.startsWith("ord_") && (
+                <button
+                  type="button"
+                  disabled={paymentBusy}
+                  onClick={() => void runRelease()}
+                  className="flex w-full items-center justify-between border border-white bg-white px-3 py-2 text-left text-[10px] tracking-[0.18em] text-black disabled:opacity-40"
+                >
+                  {paymentBusy
+                    ? "RELEASING…"
+                    : mode === "SELL"
+                      ? "RELEASE · RECEIVE INCOME"
+                      : "RELEASE ESCROW TO SELLER"}
+                  <ChevronRight className="h-3 w-3" />
                 </button>
               )}
               <button
@@ -728,19 +1056,20 @@ export function PrePurchaseVerifyModal({
   onSubmitted: (jobId: string) => void;
 }) {
   const { requireAuth } = useAuth();
+  const { showToast } = useTerminalToast();
   const [apiKey, setApiKey] = useState("");
   const [qty, setQty] = useState("50000");
   const [feePaid, setFeePaid] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+
+  const { address } = useTokentaWallet();
 
   const submit = async () => {
     if (!requireAuth("Buyer pre-purchase verification")) return;
     if (!feePaid || apiKey.length < 8) return;
-    setError(null);
     try {
       const res = await createPrePurchaseVerification({
         orderId,
-        buyerId: "buyer-demo",
+        buyerId: address ?? "buyer-anon",
         apiKey,
         declaredQuantity: Number(qty.replace(/,/g, "")) || 50_000,
         payerPaysFee: true,
@@ -748,7 +1077,11 @@ export function PrePurchaseVerifyModal({
       onSubmitted(res.jobId);
       onClose();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Verification failed");
+      showToast({
+        title: "VERIFICATION FAILED",
+        message: e instanceof Error ? e.message : "Verification failed",
+        kind: "error",
+      });
     }
   };
 
@@ -770,7 +1103,6 @@ export function PrePurchaseVerifyModal({
             <CheckRow checked={feePaid} onChange={setFeePaid} required>
               I paid the 0.1% verification fee (escrow instruction separate).
             </CheckRow>
-            {error && <p className="text-[10px] text-red-400">{error}</p>}
             <button
               type="button"
               disabled={!feePaid || apiKey.length < 8}
@@ -788,6 +1120,16 @@ export function PrePurchaseVerifyModal({
 
 /* ---------------- Tokenta buyback (3-step verify) ---------------- */
 
+function providerSlugFromOfferProvider(offerProvider: string | undefined): string {
+  if (!offerProvider) return "openai";
+  const p = offerProvider.toLowerCase();
+  if (p.includes("openai") || p.includes("gpt")) return "openai";
+  if (p.includes("anthropic") || p.includes("claude")) return "anthropic";
+  if (p.includes("google") || p.includes("gemini")) return "google";
+  if (p.includes("deepseek")) return "deepseek";
+  return "openai";
+}
+
 export function BuybackVerifyModal({
   open,
   onClose,
@@ -796,18 +1138,20 @@ export function BuybackVerifyModal({
 }: {
   open: boolean;
   onClose: () => void;
-  offer: BuybackOffer;
+  offer: BuybackOffer | null;
   onConfirmed: (orderId: string) => void;
 }) {
   const { requireAuth } = useAuth();
+  const { showToast } = useTerminalToast();
   const [step, setStep] = useState<1 | 2 | 3>(1);
-  const [provider, setProvider] = useState("OpenAI-compatible");
+  // Provider is locked to the offer's provider — never allow mismatched verification.
+  const [provider, setProvider] = useState(() => providerSlugFromOfferProvider(offer?.provider));
+  const [compatibleBaseUrl, setCompatibleBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [quantity, setQuantity] = useState("50000");
   const [verifyConsent, setVerifyConsent] = useState(false);
   const [depositAck, setDepositAck] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
-  const [submitError, setSubmitError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [confirmResult, setConfirmResult] = useState<{
     orderId: string;
@@ -817,12 +1161,17 @@ export function BuybackVerifyModal({
   const declaredNum = Number(quantity.replace(/,/g, "")) || 0;
   const consentCeiling = Math.min(Math.ceil(declaredNum * 0.03), 5000);
 
+  // Keep provider in sync when a different offer is selected.
+  useEffect(() => {
+    setProvider(providerSlugFromOfferProvider(offer?.provider));
+  }, [offer?.provider]);
+
   const reset = () => {
     setStep(1);
     setJobId(null);
-    setSubmitError(null);
     setConfirmResult(null);
     setApiKey("");
+    setProvider(providerSlugFromOfferProvider(offer?.provider));
   };
 
   const handleClose = () => {
@@ -833,24 +1182,24 @@ export function BuybackVerifyModal({
   const startVerify = async () => {
     if (!requireAuth("Tokenta buyback sale")) return;
     if (apiKey.length < 8 || !verifyConsent) return;
-    setSubmitError(null);
     try {
       const res = await createVerificationJob({
         apiKey,
         declaredQuantity: declaredNum,
         provider,
+        compatibleBaseUrl: compatibleBaseUrl || undefined,
         context: "TOKENTA_BUYBACK",
         buybackOfferId: offer.id,
-        claimedModel: provider.includes("Anthropic")
-          ? "claude-3-5-haiku-20241022"
-          : provider.includes("Google")
-            ? "gemini-1.5-flash"
-            : "gpt-4o-mini",
+        claimedModel: defaultModelForProvider(provider),
       });
       setJobId(res.jobId);
       setStep(2);
     } catch (e) {
-      setSubmitError(e instanceof Error ? e.message : "Failed to start buyback verification");
+      showToast({
+        title: "VERIFY FAILED",
+        message: e instanceof Error ? e.message : "Failed to start buyback verification",
+        kind: "error",
+      });
     }
   };
 
@@ -861,7 +1210,6 @@ export function BuybackVerifyModal({
   const handleConfirm = async () => {
     if (!jobId || !depositAck) return;
     setConfirming(true);
-    setSubmitError(null);
     try {
       const res = await confirmTokentaBuyback({
         jobId,
@@ -872,7 +1220,11 @@ export function BuybackVerifyModal({
       setConfirmResult({ orderId: res.orderId, escrowId: res.escrowId });
       onConfirmed(res.orderId);
     } catch (e) {
-      setSubmitError(e instanceof Error ? e.message : "Buyback confirm failed");
+      showToast({
+        title: "BUYBACK FAILED",
+        message: e instanceof Error ? e.message : "Buyback confirm failed",
+        kind: "error",
+      });
     } finally {
       setConfirming(false);
     }
@@ -882,6 +1234,9 @@ export function BuybackVerifyModal({
     <AnimatePresence>
       {open && (
         <ModalShell open={open} onClose={handleClose} code="BB.1" title="Sell to Tokenta · Verification">
+          {!offer ? (
+            <p className="p-4 text-[11px] text-white/50">No buyback offer selected.</p>
+          ) : (
           <div className="space-y-4 p-4">
             <div className="flex gap-2 text-[9px] tracking-[0.2em] text-white/40">
               {(["1 · KEY", "2 · VERIFY", "3 · CONFIRM"] as const).map((label, i) => (
@@ -906,22 +1261,17 @@ export function BuybackVerifyModal({
                     Offer {offer.id} · {offer.minQty} min · {offer.buybackPrice}
                   </p>
                 </div>
-                <select
-                  value={provider}
-                  onChange={(e) => setProvider(e.target.value)}
-                  className="w-full border border-white/20 bg-black px-2 py-2 text-[11px] outline-none"
-                >
-                  <option>OpenAI-compatible</option>
-                  <option>Anthropic</option>
-                  <option>Google AI</option>
-                </select>
+                {/* Provider is locked to the buyback offer — cannot be changed. */}
+                <div className="border border-white/20 bg-white/[0.03] px-3 py-2 flex items-center justify-between text-[10px] tracking-[0.14em]">
+                  <span className="text-white/40">PROVIDER (LOCKED TO OFFER)</span>
+                  <span className="text-white uppercase tracking-wider">{offer.provider}</span>
+                </div>
                 <FlowField label="API KEY" type="password" value={apiKey} onChange={setApiKey} />
                 <FlowField label="QUANTITY TO SELL" value={quantity} onChange={setQuantity} suffix="tokens" />
                 <CheckRow checked={verifyConsent} onChange={setVerifyConsent} required>
                   I authorize a controlled verification sample. Typical burn ~25–75 tokens; legal ceiling up to{" "}
                   {consentCeiling.toLocaleString()} tokens without new consent. Seller-paid probes.
                 </CheckRow>
-                {submitError && <p className="text-[10px] text-red-400">{submitError}</p>}
                 <button
                   type="button"
                   disabled={apiKey.length < 8 || !verifyConsent}
@@ -957,7 +1307,6 @@ export function BuybackVerifyModal({
                       I acknowledge 200% seller deposit held 30 days, key rotation, and fraud monitoring per buyback
                       terms.
                     </CheckRow>
-                    {submitError && <p className="text-[10px] text-red-400">{submitError}</p>}
                     <button
                       type="button"
                       disabled={!depositAck || confirming}
@@ -977,6 +1326,7 @@ export function BuybackVerifyModal({
               </>
             )}
           </div>
+          )}
         </ModalShell>
       )}
     </AnimatePresence>

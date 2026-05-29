@@ -11,7 +11,6 @@ interface LockEntry {
 }
 
 const TERMINAL_FAIL_CODES = new Set([
-  "INVALID_KEY",
   "KEY_REVOKED",
   "FORBIDDEN",
   "BLACKLIST_KEY",

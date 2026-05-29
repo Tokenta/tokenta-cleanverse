@@ -19,19 +19,34 @@ export function buildVerifyFeed(limit = 50): VerifyFeedRow[] {
     const method = "DIRECT_KEY_TEST";
 
     for (const ev of job.events) {
-      if (ev.type !== "step_completed" && ev.type !== "job_completed" && ev.type !== "job_failed") {
+      if (
+        ev.type !== "step_completed" &&
+        ev.type !== "step_failed" &&
+        ev.type !== "job_completed" &&
+        ev.type !== "job_failed"
+      ) {
         continue;
       }
       const step = ev.step ?? "FINALIZE";
-      const result =
-        ev.type === "job_failed"
-          ? "FAIL"
-          : ev.proof?.terminalOutcome === "PASS"
+      let result: string;
+      if (ev.type === "step_failed") {
+        result = ev.proof?.failureCode ?? "FAIL";
+      } else if (ev.type === "job_failed") {
+        result = ev.proof?.failureCode ?? ev.proof?.terminalOutcome ?? "FAIL";
+      } else if (ev.type === "step_completed") {
+        result =
+          ev.message?.toLowerCase().includes("failed") === true
+            ? (ev.proof?.failureCode ?? "FAIL")
+            : "PASS";
+      } else {
+        result =
+          ev.proof?.terminalOutcome === "PASS"
             ? "PASS"
-            : ev.proof?.terminalOutcome ?? "PENDING";
+            : ev.proof?.terminalOutcome ?? "PASS";
+      }
       const latencyMs = ev.proof?.probeManifest?.[0]?.latencyMs;
       rows.push({
-        ts: formatTs(ev.timestamp),
+        ts: ev.timestamp,
         asset: `LST-${asset}`,
         step,
         hash: ev.proof?.proofHash
@@ -46,13 +61,4 @@ export function buildVerifyFeed(limit = 50): VerifyFeedRow[] {
   }
 
   return rows.sort((a, b) => b.ts.localeCompare(a.ts)).slice(0, limit);
-}
-
-function formatTs(iso: string): string {
-  try {
-    const d = new Date(iso);
-    return d.toTimeString().slice(0, 12);
-  } catch {
-    return iso;
-  }
 }

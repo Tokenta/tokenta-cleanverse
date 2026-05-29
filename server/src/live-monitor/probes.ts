@@ -8,21 +8,12 @@ import { enqueueJob } from "../jobs/worker.js";
 import { retrieveListingCredential } from "../security/credential-vault.js";
 import { globalLockStore } from "../verification/lock-store.js";
 import { checkAbuseBeforeJob } from "../verification/abuse-guard.js";
-import { defaultProbeModel } from "../verification/providers/router.js";
-import type { ProviderKind } from "../types/verification.js";
+import { resolveVerificationProvider } from "../verification/providers/catalog.js";
 import { monitorTtlMs } from "./state.js";
 
 const MAX_PER_TICK = Number(process.env.LIVE_MONITOR_MAX_PROBES_PER_TICK ?? 3);
 const PROBE_AGE_RATIO = Number(process.env.LIVE_MONITOR_PROBE_AGE_RATIO ?? 0.85);
 const P2P_PROBE_ENABLED = process.env.LIVE_MONITOR_P2P_PROBE !== "false";
-
-function mapProviderKind(kind: string): ProviderKind {
-  const k = kind.toLowerCase();
-  if (k.includes("anthropic")) return "anthropic";
-  if (k.includes("google") || k.includes("gemini")) return "google";
-  if (k.includes("custom")) return "custom";
-  return "openai";
-}
 
 export function listingNeedsL1Probe(listing: ListingRecord): boolean {
   if (listing.monitorState === "REVOKED") return false;
@@ -89,9 +80,11 @@ export async function runScheduledL1Probes(): Promise<{
       continue;
     }
 
-    const provider = mapProviderKind(listing.providerKind);
-    const claimedModel =
-      listing.claimedModel ?? defaultProbeModel(provider);
+    const resolved = resolveVerificationProvider(listing.providerKind, {
+      claimedModel: listing.claimedModel,
+    });
+    const provider = resolved.kind;
+    const claimedModel = resolved.defaultModel;
 
     const job = jobStore.create(
       {
@@ -104,6 +97,8 @@ export async function runScheduledL1Probes(): Promise<{
           ? "PLATFORM_SUBSIDIZED"
           : "SELLER_PAID",
         l1Only: true,
+        compatibleBaseUrl: resolved.compatibleBaseUrl,
+        l1Strategy: resolved.l1Strategy,
       },
       { listingId: listing.id, keyFingerprint: fp },
     );

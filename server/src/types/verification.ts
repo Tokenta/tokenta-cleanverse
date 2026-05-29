@@ -106,6 +106,10 @@ export interface CreateVerificationJobRequest {
   useSellerStoredKey?: boolean;
   /** OpenAI-compatible gateway base URL (no trailing slash). Mechanism §13. */
   compatibleBaseUrl?: string;
+  /** L1 probe strategy for OpenAI-compatible vendors without /v1/models */
+  l1Strategy?: "models" | "chat";
+  /** Catalog slug (e.g. deepseek) — used to resolve probe base URL when kind is openai_compatible */
+  providerSlug?: string;
 }
 
 export interface VerificationJobResponse {
@@ -126,7 +130,7 @@ export type VerificationStepName =
   | "FINALIZE";
 
 export interface VerificationJobEvent {
-  type: "step_started" | "step_completed" | "job_completed" | "job_failed";
+  type: "step_started" | "step_completed" | "step_failed" | "job_completed" | "job_failed";
   jobId: string;
   step?: VerificationStepName;
   message?: string;

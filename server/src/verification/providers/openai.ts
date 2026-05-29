@@ -2,7 +2,8 @@
 
 import type { ProbeRecord } from "../../types/verification.js";
 import type { ProviderKind } from "../../types/verification.js";
-import { resolveOpenAiCompatibleBaseUrl } from "./openai-base.js";
+import { resolveOpenAiCompatibleBaseUrl, safeProviderFetch } from "./openai-base.js";
+import { humanizeOpenAiCompatibleError, mapOpenAiCompatibleError } from "./openai-errors.js";
 
 const CANONICAL_PROMPT = "TOKENTA_VERIFY_v1 reply OK";
 const DEFAULT_MODEL = "gpt-4o-mini";
@@ -14,10 +15,25 @@ export interface OpenAIProbeContext {
   mock?: boolean;
   provider?: ProviderKind;
   compatibleBaseUrl?: string;
+  providerSlug?: string;
+  l1Strategy?: "models" | "chat";
 }
 
 function apiBase(ctx: OpenAIProbeContext): string {
-  return resolveOpenAiCompatibleBaseUrl(ctx.provider ?? "openai", ctx.compatibleBaseUrl);
+  return resolveOpenAiCompatibleBaseUrl(
+    ctx.provider ?? "openai",
+    ctx.compatibleBaseUrl,
+    ctx.providerSlug,
+  );
+}
+
+function isProbeTransportError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return (
+    msg.includes("PROBE_NETWORK_UNREACHABLE") ||
+    msg.includes("PROBE_TIMEOUT") ||
+    msg === "fetch failed"
+  );
 }
 
 export interface LivenessResult {
@@ -26,6 +42,8 @@ export interface LivenessResult {
   latencyMs: number;
   httpStatus: number;
   errorCode?: string;
+  /** Rate-limit headers from the L1 response (present when L1 used a chat probe) */
+  headers?: Record<string, string>;
   record: ProbeRecord;
 }
 
@@ -97,26 +115,34 @@ export async function openaiLiveness(ctx: OpenAIProbeContext): Promise<LivenessR
     return mockLiveness(ctx);
   }
 
+  if (ctx.l1Strategy === "chat") {
+    return livenessViaChat(ctx);
+  }
+
   const start = Date.now();
   const base = apiBase(ctx);
-  const res = await fetch(`${base}/v1/models`, {
-    headers: { Authorization: `Bearer ${ctx.apiKey}` },
-  });
-  const latencyMs = Date.now() - start;
-  const httpStatus = res.status;
+  const modelsUrl = `${base}/v1/models`;
+  try {
+    const res = await safeProviderFetch(modelsUrl, {
+      headers: { Authorization: `Bearer ${ctx.apiKey}` },
+    });
+    const latencyMs = Date.now() - start;
+    const httpStatus = res.status;
 
-  if (!res.ok) {
-    const err = await res.text();
-    let errorCode = "INVALID_KEY";
-    if (httpStatus === 401) errorCode = "INVALID_KEY";
-    else if (httpStatus === 429) errorCode = "RATE_LIMITED";
-    else if (httpStatus === 403) errorCode = "FORBIDDEN";
+    if (!res.ok) {
+      if (httpStatus === 404 || httpStatus === 405 || httpStatus === 401) {
+        return livenessViaChat(ctx);
+      }
+      return failedLiveness(ctx, modelsUrl, res, latencyMs, httpStatus);
+    }
+
+    const body = (await res.json()) as { data?: { id: string }[] };
+    const modelIds = (body.data ?? []).map((m) => m.id);
     return {
-      ok: false,
-      modelIds: [],
+      ok: true,
+      modelIds,
       latencyMs,
       httpStatus,
-      errorCode,
       record: {
         paradigm: "A",
         endpoint: "GET /v1/models",
@@ -126,33 +152,77 @@ export async function openaiLiveness(ctx: OpenAIProbeContext): Promise<LivenessR
         tokensUsed: 0,
         requestsUsed: 1,
         maxTokensUsed: 0,
-        result: "FAIL",
+        result: "PASS",
         timestamp: new Date().toISOString(),
         cached: false,
-        errorCode,
       },
     };
+  } catch (e) {
+    if (!isProbeTransportError(e)) {
+      return livenessViaChat(ctx);
+    }
+    try {
+      return await livenessViaChat(ctx);
+    } catch (chatErr) {
+      const modelsMsg = e instanceof Error ? e.message : String(e);
+      const chatMsg = chatErr instanceof Error ? chatErr.message : String(chatErr);
+      throw new Error(
+        `${modelsMsg} Fallback chat probe also failed: ${chatMsg}`,
+      );
+    }
   }
+}
 
-  const body = (await res.json()) as { data?: { id: string }[] };
-  const modelIds = (body.data ?? []).map((m) => m.id);
+async function failedLiveness(
+  ctx: OpenAIProbeContext,
+  probeUrl: string,
+  res: Response,
+  latencyMs: number,
+  httpStatus: number,
+): Promise<LivenessResult> {
+  const errBody = await res.text().catch(() => "");
+  const errorCode = mapOpenAiCompatibleError(httpStatus, errBody);
   return {
-    ok: true,
-    modelIds,
+    ok: false,
+    modelIds: [],
     latencyMs,
     httpStatus,
+    errorCode,
     record: {
       paradigm: "A",
-      endpoint: "GET /v1/models",
+      endpoint:
+        errBody.length > 0 && errBody.length < 120
+          ? `GET /v1/models [${httpStatus}] ${errBody}`
+          : `GET /v1/models [${httpStatus}]`,
       probeModelId: ctx.probeModelId,
       httpStatus,
       latencyMs,
       tokensUsed: 0,
       requestsUsed: 1,
       maxTokensUsed: 0,
-      result: "PASS",
+      result: "FAIL",
       timestamp: new Date().toISOString(),
       cached: false,
+      errorCode,
+    },
+  };
+}
+
+async function livenessViaChat(ctx: OpenAIProbeContext): Promise<LivenessResult> {
+  const micro = await openaiMicroProbe({ ...ctx, maxTokens: 1 });
+  return {
+    ok: micro.ok,
+    modelIds: micro.ok ? [ctx.probeModelId] : [],
+    latencyMs: micro.latencyMs,
+    httpStatus: micro.httpStatus,
+    errorCode: micro.errorCode,
+    // Propagate rate-limit headers from L1 chat probe so orchestrator can
+    // perform pre-L2 quota signal check (spec §7 step 5).
+    headers: micro.headers,
+    record: {
+      ...micro.record,
+      paradigm: "A",
+      endpoint: "POST /v1/chat/completions (L1 chat probe)",
     },
   };
 }
@@ -164,19 +234,48 @@ export async function openaiMicroProbe(ctx: OpenAIProbeContext): Promise<MicroPr
 
   const start = Date.now();
   const base = apiBase(ctx);
-  const res = await fetch(`${base}/v1/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${ctx.apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: ctx.probeModelId,
-      messages: [{ role: "user", content: CANONICAL_PROMPT }],
-      max_tokens: ctx.maxTokens,
-      temperature: 0,
-    }),
-  });
+  const chatUrl = `${base}/v1/chat/completions`;
+  let res: Response;
+  try {
+    res = await safeProviderFetch(chatUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${ctx.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: ctx.probeModelId,
+        messages: [{ role: "user", content: CANONICAL_PROMPT }],
+        max_tokens: ctx.maxTokens,
+        temperature: 0,
+      }),
+    });
+  } catch (e) {
+    const latencyMs = Date.now() - start;
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      ok: false,
+      latencyMs,
+      httpStatus: 0,
+      tokensUsed: 0,
+      headers: {},
+      errorCode: msg.includes("PROBE_TIMEOUT") ? "PROBE_TIMEOUT" : "NETWORK_UNREACHABLE",
+      record: {
+        paradigm: "C",
+        endpoint: "POST /v1/chat/completions",
+        probeModelId: ctx.probeModelId,
+        httpStatus: 0,
+        latencyMs,
+        tokensUsed: 0,
+        requestsUsed: 0,
+        maxTokensUsed: 0,
+        result: "FAIL",
+        timestamp: new Date().toISOString(),
+        cached: false,
+        errorCode: "NETWORK_UNREACHABLE",
+      },
+    };
+  }
   const latencyMs = Date.now() - start;
   const httpStatus = res.status;
   const headers: Record<string, string> = {};
@@ -186,10 +285,7 @@ export async function openaiMicroProbe(ctx: OpenAIProbeContext): Promise<MicroPr
 
   if (!res.ok) {
     const errBody = await res.text();
-    let errorCode = "QUOTA_EXHAUSTED";
-    if (httpStatus === 401) errorCode = "INVALID_KEY";
-    else if (httpStatus === 404) errorCode = "MODEL_NOT_ENTITLED";
-    else if (errBody.includes("insufficient_quota")) errorCode = "QUOTA_EXHAUSTED";
+    const errorCode = mapOpenAiCompatibleError(httpStatus, errBody);
     return {
       ok: false,
       latencyMs,

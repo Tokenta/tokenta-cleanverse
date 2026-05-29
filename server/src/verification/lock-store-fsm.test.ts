@@ -3,7 +3,6 @@ import { VerificationLockStore } from "./lock-store.js";
 import { resetAuditForTest } from "../security/audit-log.js";
 
 const TERMINAL_CODES = [
-  "INVALID_KEY",
   "KEY_REVOKED",
   "FORBIDDEN",
   "BLACKLIST_KEY",
@@ -19,6 +18,12 @@ describe("lock FSM §4C transition table", () => {
   beforeEach(() => {
     resetAuditForTest();
     store = new VerificationLockStore();
+  });
+
+  it("applyFailure(INVALID_KEY) does not terminal-lock", () => {
+    const fp = "fp_invalid_key";
+    store.applyFailure(fp, "INVALID_KEY");
+    expect(store.get(fp)).toBe("UNLOCKED");
   });
 
   it.each(TERMINAL_CODES)("applyFailure(%s) -> TERMINAL_FAIL_LOCKED", (code) => {

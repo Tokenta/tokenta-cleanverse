@@ -17,6 +17,7 @@ export function TopBar({
   reputationDisplay = "--",
   reputationTier = undefined,
   reputationLive = false,
+  onOpenReputation,
 }: {
   mode: TradingMode;
   onModeChange: (m: TradingMode) => void;
@@ -31,6 +32,7 @@ export function TopBar({
   reputationDisplay?: string | null;
   reputationTier?: string;
   reputationLive?: boolean;
+  onOpenReputation?: () => void;
 }) {
   const blockDisplay =
     blockNumber != null ? `#${blockNumber.toLocaleString()}` : networkLive ? "…" : "—";
@@ -75,7 +77,14 @@ export function TopBar({
       </div>
 
       <div className="tokenta-topbar__actions flex items-center gap-4 min-w-0 shrink-0">
-        <div className="tokenta-topbar__reputation hidden md:flex flex-col text-right leading-tight tokenta-type-nav">
+        <button
+          type="button"
+          onClick={onOpenReputation}
+          disabled={!onOpenReputation}
+          className={`tokenta-topbar__reputation hidden md:flex flex-col text-right leading-tight tokenta-type-nav ${
+            onOpenReputation ? "cursor-pointer hover:text-white transition-colors" : ""
+          }`}
+        >
           <span className="text-[10px] text-white/40 tracking-[0.2em]">
             REPUTATION{reputationLive ? "" : " · OFFLINE"}
           </span>
@@ -85,7 +94,7 @@ export function TopBar({
               / 100{reputationTier && reputationTier !== "NONE" ? ` · ${reputationTier}` : ""}
             </span>
           </span>
-        </div>
+        </button>
         <WalletMenu onOpenWallet={onOpenWallet} />
         <div className="tokenta-type-nav text-white/50 tracking-[0.18em] tokenta-mono-spacing shrink-0">{clock}</div>
       </div>

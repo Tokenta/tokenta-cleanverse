@@ -1,0 +1,479 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Tokenta Terminal API",
+    "version": "1.0.0",
+    "description": "Terminal-facing facade over the verification engine"
+  },
+  "servers": [
+    {
+      "url": "/api/v1/terminal",
+      "description": "Relative to API host (e.g. localhost:8787)"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Session"
+    },
+    {
+      "name": "Run"
+    },
+    {
+      "name": "Job"
+    },
+    {
+      "name": "Stream"
+    },
+    {
+      "name": "Proof"
+    },
+    {
+      "name": "Receipt"
+    },
+    {
+      "name": "Anchor"
+    },
+    {
+      "name": "Market"
+    },
+    {
+      "name": "Orders"
+    },
+    {
+      "name": "Escrow"
+    },
+    {
+      "name": "Buyback"
+    },
+    {
+      "name": "Sign"
+    },
+    {
+      "name": "Metrics"
+    },
+    {
+      "name": "Feed"
+    },
+    {
+      "name": "Reputation"
+    },
+    {
+      "name": "Wallet"
+    },
+    {
+      "name": "Analytics"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "Session"
+        ],
+        "summary": "Terminal layer health",
+        "operationId": "terminalHealth"
+      }
+    },
+    "/network": {
+      "get": {
+        "tags": [
+          "Session"
+        ],
+        "summary": "Base Sepolia network + chain telemetry",
+        "operationId": "terminalNetwork"
+      }
+    },
+    "/timezone": {
+      "get": {
+        "tags": [
+          "Session"
+        ],
+        "summary": "Effective terminal timezone (browser / session / optional IP)",
+        "operationId": "getTerminalTimezone"
+      }
+    },
+    "/session": {
+      "post": {
+        "tags": [
+          "Session"
+        ],
+        "summary": "Create session",
+        "operationId": "createTerminalSession"
+      },
+      "get": {
+        "tags": [
+          "Session"
+        ],
+        "summary": "Get session",
+        "operationId": "getTerminalSession"
+      },
+      "delete": {
+        "tags": [
+          "Session"
+        ],
+        "summary": "Delete session",
+        "operationId": "deleteTerminalSession"
+      }
+    },
+    "/session/timezone": {
+      "patch": {
+        "tags": [
+          "Session"
+        ],
+        "summary": "Update session timezone",
+        "operationId": "patchTerminalSessionTimezone"
+      }
+    },
+    "/run": {
+      "post": {
+        "tags": [
+          "Run"
+        ],
+        "summary": "Start verification run",
+        "operationId": "terminalRun"
+      }
+    },
+    "/run/{terminalJobId}/cancel": {
+      "post": {
+        "tags": [
+          "Run"
+        ],
+        "summary": "Cancel running/queued job",
+        "operationId": "terminalRunCancel"
+      }
+    },
+    "/listings/run": {
+      "post": {
+        "tags": [
+          "Run"
+        ],
+        "summary": "List API + start verify",
+        "operationId": "terminalListingsRun"
+      }
+    },
+    "/job/{terminalJobId}": {
+      "get": {
+        "tags": [
+          "Job"
+        ],
+        "summary": "Get terminal job",
+        "operationId": "getTerminalJob"
+      }
+    },
+    "/job/{terminalJobId}/events": {
+      "get": {
+        "tags": [
+          "Stream"
+        ],
+        "summary": "SSE job events",
+        "operationId": "streamTerminalJobEvents"
+      }
+    },
+    "/job/{terminalJobId}/proof": {
+      "get": {
+        "tags": [
+          "Proof"
+        ],
+        "summary": "Proof by job id",
+        "operationId": "getTerminalJobProof"
+      }
+    },
+    "/proof/{proofHash}": {
+      "get": {
+        "tags": [
+          "Proof"
+        ],
+        "summary": "Download proof",
+        "operationId": "getTerminalProof"
+      }
+    },
+    "/receipt/{terminalJobId}": {
+      "get": {
+        "tags": [
+          "Receipt"
+        ],
+        "summary": "Execution receipt",
+        "operationId": "getTerminalReceipt"
+      }
+    },
+    "/receipt/{terminalJobId}/export": {
+      "get": {
+        "tags": [
+          "Receipt"
+        ],
+        "summary": "Export receipt",
+        "operationId": "exportTerminalReceipt"
+      }
+    },
+    "/anchor/{proofHash}": {
+      "get": {
+        "tags": [
+          "Anchor"
+        ],
+        "summary": "Anchor status",
+        "operationId": "getTerminalAnchor"
+      }
+    },
+    "/anchor/{proofHash}/submit": {
+      "post": {
+        "tags": [
+          "Anchor"
+        ],
+        "summary": "Submit anchor tx",
+        "operationId": "submitTerminalAnchor"
+      }
+    },
+    "/anchor/reconcile": {
+      "post": {
+        "tags": [
+          "Anchor"
+        ],
+        "summary": "Reconcile PENDING anchor txs on Base Sepolia",
+        "operationId": "reconcileTerminalAnchors"
+      }
+    },
+    "/market/listings": {
+      "get": {
+        "tags": [
+          "Market"
+        ],
+        "summary": "Market listings",
+        "operationId": "getTerminalMarketListings"
+      }
+    },
+    "/feed": {
+      "get": {
+        "tags": [
+          "Feed"
+        ],
+        "summary": "Verification feed",
+        "operationId": "getTerminalFeed"
+      }
+    },
+    "/metrics/health": {
+      "get": {
+        "tags": [
+          "Metrics"
+        ],
+        "summary": "Pipeline health",
+        "operationId": "getTerminalMetricsHealth"
+      }
+    },
+    "/metrics/composition": {
+      "get": {
+        "tags": [
+          "Metrics"
+        ],
+        "summary": "Proof composition",
+        "operationId": "getTerminalMetricsComposition"
+      }
+    },
+    "/reputation": {
+      "get": {
+        "tags": [
+          "Reputation"
+        ],
+        "summary": "Trust Layer score (proof-weighted execution reputation)",
+        "description": "Returns UNVERIFIED until 3 PASS verifications and 1 anchored receipt. Composite is null with compositeDisplay \"--\" until unlocked.",
+        "operationId": "getTerminalReputation"
+      }
+    },
+    "/reputation/ledger": {
+      "get": {
+        "tags": [
+          "Reputation"
+        ],
+        "summary": "Append-only reputation event ledger",
+        "description": "Replayable event log; composite score is derived from ledger replay.",
+        "operationId": "getTerminalReputationLedger"
+      }
+    },
+    "/wallet/summary": {
+      "get": {
+        "tags": [
+          "Wallet"
+        ],
+        "summary": "Wallet balances and settlement",
+        "operationId": "getTerminalWalletSummary"
+      }
+    },
+    "/wallet/income": {
+      "get": {
+        "tags": [
+          "Wallet"
+        ],
+        "summary": "Seller sale income summary",
+        "operationId": "getTerminalWalletIncome"
+      }
+    },
+    "/wallet/deposit": {
+      "post": {
+        "tags": [
+          "Wallet"
+        ],
+        "summary": "Deposit USDC (testnet sim)",
+        "operationId": "terminalWalletDeposit"
+      }
+    },
+    "/wallet/withdraw": {
+      "post": {
+        "tags": [
+          "Wallet"
+        ],
+        "summary": "Withdraw USDC to connected wallet",
+        "operationId": "terminalWalletWithdraw"
+      }
+    },
+    "/analytics/overview": {
+      "get": {
+        "tags": [
+          "Analytics"
+        ],
+        "summary": "Analytics dashboard",
+        "operationId": "getTerminalAnalyticsOverview"
+      }
+    },
+    "/listings/{listingId}/bind-verification": {
+      "post": {
+        "tags": [
+          "Market"
+        ],
+        "summary": "Bind proof to listing",
+        "operationId": "terminalBindVerification"
+      }
+    },
+    "/sign/bind": {
+      "post": {
+        "tags": [
+          "Sign"
+        ],
+        "summary": "Sign bind payload",
+        "operationId": "terminalSignBind"
+      }
+    },
+    "/sign/escrow": {
+      "post": {
+        "tags": [
+          "Sign"
+        ],
+        "summary": "Sign escrow payload",
+        "operationId": "terminalSignEscrow"
+      }
+    },
+    "/buyback/confirm": {
+      "post": {
+        "tags": [
+          "Buyback"
+        ],
+        "summary": "Confirm buyback",
+        "operationId": "terminalBuybackConfirm"
+      }
+    },
+    "/orders/purchase": {
+      "post": {
+        "tags": [
+          "Orders"
+        ],
+        "summary": "Purchase listing",
+        "operationId": "terminalOrdersPurchase"
+      }
+    },
+    "/orders": {
+      "get": {
+        "tags": [
+          "Orders"
+        ],
+        "summary": "List terminal orders",
+        "operationId": "listTerminalOrders"
+      }
+    },
+    "/orders/{orderId}": {
+      "get": {
+        "tags": [
+          "Orders"
+        ],
+        "summary": "Get order",
+        "operationId": "getTerminalOrder"
+      }
+    },
+    "/orders/{orderId}/messages": {
+      "get": {
+        "tags": [
+          "Orders"
+        ],
+        "summary": "List order room messages",
+        "operationId": "listOrderRoomMessages"
+      },
+      "post": {
+        "tags": [
+          "Orders"
+        ],
+        "summary": "Post order room message",
+        "operationId": "postOrderRoomMessage"
+      }
+    },
+    "/orders/{orderId}/actions/{action}": {
+      "post": {
+        "tags": [
+          "Orders"
+        ],
+        "summary": "Run order room action",
+        "operationId": "runOrderRoomAction"
+      }
+    },
+    "/orders/{orderId}/verification-trail": {
+      "get": {
+        "tags": [
+          "Orders"
+        ],
+        "summary": "Verification trail",
+        "operationId": "getTerminalOrderTrail"
+      }
+    },
+    "/orders/{orderId}/escrow": {
+      "get": {
+        "tags": [
+          "Escrow"
+        ],
+        "summary": "Escrow status",
+        "operationId": "getTerminalEscrow"
+      }
+    },
+    "/orders/{orderId}/escrow/fund": {
+      "post": {
+        "tags": [
+          "Escrow"
+        ],
+        "summary": "Fund escrow",
+        "operationId": "terminalEscrowFund"
+      }
+    },
+    "/orders/{orderId}/escrow/release": {
+      "post": {
+        "tags": [
+          "Escrow"
+        ],
+        "summary": "Release escrow",
+        "operationId": "terminalEscrowRelease"
+      }
+    },
+    "/orders/{orderId}/fraud-monitor": {
+      "get": {
+        "tags": [
+          "Orders"
+        ],
+        "summary": "Fraud monitor",
+        "operationId": "getTerminalFraudMonitor"
+      }
+    },
+    "/orders/{orderId}/fraud-monitor/run": {
+      "post": {
+        "tags": [
+          "Orders"
+        ],
+        "summary": "Run fraud check",
+        "operationId": "terminalFraudMonitorRun"
+      }
+    }
+  }
+}

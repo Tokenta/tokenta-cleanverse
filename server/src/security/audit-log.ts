@@ -6,7 +6,8 @@ export type AuditEventType =
   | "OPS_OVERRIDE"
   | "ESCROW_FUND"
   | "ESCROW_RELEASE"
-  | "BIND_VERIFICATION";
+  | "BIND_VERIFICATION"
+  | "LISTING_PUBLISHED";
 
 export interface AuditEntry {
   type: AuditEventType;

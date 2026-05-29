@@ -8,9 +8,12 @@ import { storeListingCredential } from "../security/credential-vault.js";
 import { validateBuyerTriggeredJob } from "../verification/buyer-verify-policy.js";
 import { sellerNotificationForBuyerVerify } from "../verification/buyer-verify-policy.js";
 import { isDbPersistenceEnabled } from "../db/prisma.js";
-import type { CreateVerificationJobRequest, ProviderKind } from "../types/verification.js";
+import type { CreateVerificationJobRequest } from "../types/verification.js";
 import type { TerminalRunMode } from "./types.js";
 import { terminalJobIdFromEngine } from "./job-status.js";
+import { resolveVerificationProvider } from "../verification/providers/catalog.js";
+
+export { mapProviderInput } from "../verification/providers/catalog.js";
 
 export function modeToContext(mode: TerminalRunMode): CreateVerificationJobRequest["context"] {
   switch (mode) {
@@ -27,17 +30,6 @@ export function modeToContext(mode: TerminalRunMode): CreateVerificationJobReque
     default:
       return "LISTING_DRAFT";
   }
-}
-
-export function mapProviderInput(pk: string): ProviderKind {
-  const m: Record<string, ProviderKind> = {
-    openai: "openai",
-    "openai-compatible": "openai",
-    anthropic: "anthropic",
-    google: "google",
-    gemini: "google",
-  };
-  return m[pk.toLowerCase()] ?? "openai";
 }
 
 export type RunJobResult =
@@ -59,8 +51,13 @@ export function createEngineJobFromTerminalRun(body: {
   buyerId?: string;
   sellerListingId?: string;
   l1Only?: boolean;
+  compatibleBaseUrl?: string;
 }): RunJobResult {
   const context = modeToContext(body.mode);
+  const resolved = resolveVerificationProvider(body.provider, {
+    compatibleBaseUrl: body.compatibleBaseUrl,
+    claimedModel: body.claimedModel,
+  });
 
   if (context === "KEY_ROTATION") {
     if (!body.orderId) return { ok: false, status: 400, error: "orderId required for rotation" };
@@ -80,7 +77,7 @@ export function createEngineJobFromTerminalRun(body: {
     payerPaysFee: body.payerPaysFee,
     apiKey: body.apiKey,
     declaredQuantity: body.declaredQuantity,
-    provider: mapProviderInput(body.provider ?? "openai"),
+    provider: resolved.kind,
   });
   if (!buyerPolicy.ok) {
     return { ok: false, status: 400, error: buyerPolicy.message, code: buyerPolicy.code };
@@ -93,7 +90,20 @@ export function createEngineJobFromTerminalRun(body: {
     return { ok: false, status: 400, error: "declaredQuantity required" };
   }
 
-  const provider = mapProviderInput(body.provider ?? "openai");
+  if (
+    resolved.listingProviderKind === "openai-compatible" &&
+    !resolved.compatibleBaseUrl?.trim()
+  ) {
+    return {
+      ok: false,
+      status: 400,
+      error:
+        "Gateway base URL is required when using OpenAI-compatible (custom gateway). Select DeepSeek or another named provider instead.",
+      code: "MISSING_BASE_URL",
+    };
+  }
+
+  const provider = resolved.kind;
   const fp = keyFingerprint(body.apiKey);
   const abuse = checkAbuseBeforeJob(fp);
   if (!abuse.allowed) {
@@ -111,10 +121,11 @@ export function createEngineJobFromTerminalRun(body: {
     {
       context,
       provider,
+      providerSlug: resolved.listingProviderKind,
       apiKey: body.apiKey,
       oldApiKey: body.oldApiKey,
       declaredQuantity: body.declaredQuantity,
-      claimedModel: body.claimedModel ?? "gpt-4o-mini",
+      claimedModel: resolved.defaultModel,
       costLiability,
       buybackOfferId: body.buybackOfferId,
       orderId: body.orderId,
@@ -123,6 +134,8 @@ export function createEngineJobFromTerminalRun(body: {
       payerPaysFee: body.payerPaysFee,
       listingId: body.listingId,
       l1Only: context === "LIVE" ? true : body.l1Only,
+      compatibleBaseUrl: resolved.compatibleBaseUrl,
+      l1Strategy: resolved.l1Strategy,
     },
     { listingId: body.listingId, keyFingerprint: fp },
   );
@@ -149,9 +162,28 @@ export async function createListingAndJob(body: {
   providerKind?: string;
   claimedModel?: string;
   autoListAfterVerify?: boolean;
+  sellerWallet?: string | null;
+  compatibleBaseUrl?: string;
 }): RunJobResult & { listingId?: string } {
   if (!body.apiKey || body.apiKey.length < 8) {
     return { ok: false, status: 400, error: "apiKey required" };
+  }
+
+  for (let i = 0; i < body.apiKey.length; i++) {
+    const code = body.apiKey.charCodeAt(i);
+    if (code < 0x20 || code > 0x7e) {
+      return {
+        ok: false,
+        status: 400,
+        error:
+          "API key contains non-ASCII characters at index " +
+          i +
+          " (code " +
+          code +
+          "). Re-paste only the raw key (no surrounding text or hidden whitespace).",
+        code: "INVALID_KEY_FORMAT",
+      };
+    }
   }
 
   const fp = keyFingerprint(body.apiKey);
@@ -160,23 +192,41 @@ export async function createListingAndJob(body: {
     return { ok: false, status: 429, error: abuse.message ?? "rate limited", code: abuse.code };
   }
 
-  const pk = body.providerKind ?? "openai";
-  const provider = mapProviderInput(pk);
+  const resolved = resolveVerificationProvider(body.providerKind, {
+    compatibleBaseUrl: body.compatibleBaseUrl,
+    claimedModel: body.claimedModel,
+  });
+
+  if (
+    resolved.listingProviderKind === "openai-compatible" &&
+    !resolved.compatibleBaseUrl?.trim()
+  ) {
+    return {
+      ok: false,
+      status: 400,
+      error:
+        "Gateway base URL is required when using OpenAI-compatible (custom gateway). Select DeepSeek or another named provider instead.",
+      code: "MISSING_BASE_URL",
+    };
+  }
 
   const jobRequest: CreateVerificationJobRequest = {
     context: "LISTING_DRAFT",
-    provider,
+    provider: resolved.kind,
+    providerSlug: resolved.listingProviderKind,
     apiKey: body.apiKey,
     declaredQuantity: Number(body.quotaToSell),
-    claimedModel: body.claimedModel ?? "gpt-4o-mini",
+    claimedModel: resolved.defaultModel,
     costLiability: "SELLER_PAID",
     askPriceUsdc: Number(body.askPriceUsdc),
     autoListAfterVerify: body.autoListAfterVerify ?? true,
+    compatibleBaseUrl: resolved.compatibleBaseUrl,
+    l1Strategy: resolved.l1Strategy,
   };
 
   const job = jobStore.create(jobRequest, { keyFingerprint: fp });
   const listing = listingStore.create({
-    providerKind: pk,
+    providerKind: resolved.listingProviderKind,
     quotaToSell: jobRequest.declaredQuantity,
     askPriceUsdc: Number(body.askPriceUsdc),
     keyFingerprint: fp,
@@ -184,6 +234,7 @@ export async function createListingAndJob(body: {
     verificationJobId: job.id,
     listingSource: "P2P",
     platformSubsidized: false,
+    sellerWallet: body.sellerWallet ?? null,
   });
 
   const credentialRef = await storeListingCredential(listing.id, body.apiKey);

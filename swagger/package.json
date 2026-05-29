@@ -1,0 +1,8 @@
+{
+  "name": "@tokenta/swagger-docs",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "build": "node -e \"console.log('Swagger static site ready')\""
+  }
+}

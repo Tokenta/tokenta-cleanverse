@@ -8,10 +8,10 @@ describe("openai-base", () => {
     process.env.OPENAI_COMPATIBLE_BASE_URL = prev;
   });
 
-  it("uses override URL for openai_compatible", () => {
+  it("strips trailing /v1 from override so /v1/models is not doubled", () => {
     expect(
       resolveOpenAiCompatibleBaseUrl("openai_compatible", "https://gateway.example/v1/"),
-    ).toBe("https://gateway.example/v1");
+    ).toBe("https://gateway.example");
   });
 
   it("uses env for custom provider", () => {
@@ -22,5 +22,18 @@ describe("openai-base", () => {
   it("defaults to api.openai.com for openai", () => {
     delete process.env.OPENAI_COMPATIBLE_BASE_URL;
     expect(resolveOpenAiCompatibleBaseUrl("openai")).toBe("https://api.openai.com");
+  });
+
+  it("resolves deepseek slug to api.deepseek.com", () => {
+    expect(resolveOpenAiCompatibleBaseUrl("openai_compatible", undefined, "deepseek")).toBe(
+      "https://api.deepseek.com",
+    );
+  });
+
+  it("throws when openai_compatible has no override or slug", () => {
+    delete process.env.OPENAI_COMPATIBLE_BASE_URL;
+    expect(() => resolveOpenAiCompatibleBaseUrl("openai_compatible")).toThrow(
+      "MISSING_COMPATIBLE_BASE_URL",
+    );
   });
 });
