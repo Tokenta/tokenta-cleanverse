@@ -13,3 +13,5 @@ coverage/
 .vercel/
 server/prisma/*.db
 server/prisma/*.db-journal
+
+.vercel

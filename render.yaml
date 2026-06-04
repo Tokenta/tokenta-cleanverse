@@ -1,0 +1,62 @@
+services:
+  - type: web
+    name: tokenta-terminal-api
+    runtime: node
+    plan: free
+    region: singapore
+    rootDir: server
+    buildCommand: npm install --production=false
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22.16.0"
+      - key: VERIFICATION_MOCK
+        value: "false"
+      - key: P2P_L1_ONLY_DEFAULT
+        value: "true"
+      - key: LIVE_MONITOR_ENABLED
+        value: "true"
+      - key: USE_REDIS_QUEUE
+        value: "false"
+      - key: USE_BULLMQ
+        value: "false"
+      - key: OPENAI_COMPATIBLE_BASE_URL
+        value: "https://api.openai.com"
+      - key: DEV_CREDENTIAL_VAULT
+        value: "true"
+      - key: DEV_CREDENTIAL_VAULT_ENCRYPTED
+        value: "false"
+      - key: REQUIRE_API_AUTH
+        value: "false"
+      - key: WALLET_AUTH
+        value: "false"
+      - key: PRIVY_JWT_MODE
+        value: "false"
+      - key: PRIVY_JWT_VERIFY
+        value: "false"
+      - key: REQUIRE_ESCROW_SIGNATURE
+        value: "false"
+      - key: REQUIRE_BIND_SIGNATURE
+        value: "false"
+      - key: PROOF_ANCHOR_RPC_URL
+        value: "https://sepolia.base.org"
+      - key: SETTLEMENT_NETWORK
+        value: "base-sepolia"
+      - key: SETTLEMENT_CHAIN_ID
+        value: "84532"
+      - key: SETTLEMENT_RPC_URL
+        value: "https://sepolia.base.org"
+      - key: SETTLEMENT_DRY_RUN
+        value: "true"
+      - key: ESCROW_WALLET
+        value: "0x4463c9f60c27ebF9A966f8cD55d54e08114afb9E"
+      - key: TREASURY_WALLET
+        value: "0x419fe9C2e707a4Ce3613c9945f9Dca03aeDD485d"
+      - key: TERMINAL_SESSION_REQUIRED
+        value: "false"
+      - key: TERMINAL_TIMEZONE_IP_LOOKUP
+        value: "false"
+      - key: CORS_ORIGIN
+        value: "https://terminal.tokenta.space,https://www.terminal.tokenta.space,https://tokenta-terminal.vercel.app"

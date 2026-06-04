@@ -54,10 +54,24 @@ import { terminalApp } from "./terminal-routes.js";
 
 const app = new Hono();
 
+const corsOrigins = [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "https://terminal.tokenta.space",
+  "https://www.terminal.tokenta.space",
+];
+if (process.env.CORS_ORIGIN) {
+  corsOrigins.push(
+    ...process.env.CORS_ORIGIN.split(",")
+      .map((o) => o.trim())
+      .filter(Boolean),
+  );
+}
+
 app.use(
   "/*",
   cors({
-    origin: ["http://localhost:5173", "http://127.0.0.1:5173"],
+    origin: corsOrigins,
     allowMethods: ["GET", "POST", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization", "X-Wallet-Address", "X-Terminal-Session", "Last-Event-ID"],
   }),
