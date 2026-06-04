@@ -73,7 +73,15 @@ app.use(
   cors({
     origin: corsOrigins,
     allowMethods: ["GET", "POST", "OPTIONS"],
-    allowHeaders: ["Content-Type", "Authorization", "X-Wallet-Address", "X-Terminal-Session", "Last-Event-ID"],
+    allowHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Wallet-Address",
+      "X-Terminal-Session",
+      "X-Timezone",
+      "X-Timezone-Source",
+      "Last-Event-ID",
+    ],
   }),
 );
 
