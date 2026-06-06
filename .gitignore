@@ -15,3 +15,6 @@ server/prisma/*.db
 server/prisma/*.db-journal
 
 .vercel
+
+# api-inspector is a separate open-source repo (github.com/Tokenta/api-inspector).
+api-inspector/
