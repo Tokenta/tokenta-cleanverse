@@ -60,3 +60,5 @@ services:
         value: "false"
       - key: CORS_ORIGIN
         value: "https://terminal.tokenta.space,https://www.terminal.tokenta.space,https://tokenta-terminal.vercel.app,https://cleanverse.tokenta.space"
+      - key: CLEANVERSE_API_KEY
+        sync: false

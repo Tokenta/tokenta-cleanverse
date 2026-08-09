@@ -87,8 +87,12 @@ export class ComplianceOrchestrator {
         reasonCodes
       };
 
-    } catch (e) {
+    } catch (e: any) {
       console.error('Compliance evaluation failed:', e);
+      const reason = e.name === 'CleanverseNotConfiguredError' || e.message?.includes('auth')
+        ? 'UPSTREAM_CREDENTIAL_UNAVAILABLE'
+        : 'UPSTREAM_CREDENTIAL_UNAVAILABLE'; // Forcing to match user req for any upstream failure
+
       return {
         buyerIdentityStatus: IdentityComplianceState.UNAVAILABLE,
         sellerIdentityStatus: IdentityComplianceState.UNAVAILABLE,
@@ -97,7 +101,7 @@ export class ComplianceOrchestrator {
         overallDecision: TradeComplianceDecision.UNAVAILABLE,
         evidenceReferences: [],
         timestamp: new Date().toISOString(),
-        reasonCodes: ['CLEANVERSE_API_UNAVAILABLE']
+        reasonCodes: [reason]
       };
     }
   }

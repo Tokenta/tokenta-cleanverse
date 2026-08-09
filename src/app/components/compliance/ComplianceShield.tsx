@@ -106,7 +106,7 @@ export function ComplianceShield({ orderId, children }: ComplianceShieldProps) {
 
           <div className="space-y-3">
             <div className="flex justify-between items-center bg-white/5 p-2 rounded">
-              <span className="text-gray-400">POLICY <span className="text-[10px] text-gray-500">(RuleV2 Enforced)</span></span>
+              <span className="text-gray-400">POLICY <span className="text-[10px] text-gray-500">(RuleV2 minSubTier: 50)</span></span>
               <div className="flex items-center gap-2 text-white">
                 {result.policyDecision} {renderStatusIcon(result.policyDecision)}
               </div>
@@ -119,8 +119,8 @@ export function ComplianceShield({ orderId, children }: ComplianceShieldProps) {
             </div>
             <div className={`flex justify-between items-center p-2 rounded border ${status === 'DENIED' ? 'bg-red-500/10 border-red-500/30' : 'bg-[#00f0ff]/10 border-[#00f0ff]/30'}`}>
               <span className="font-bold text-white tracking-widest">FINAL DECISION</span>
-              <div className={`flex items-center gap-2 font-bold ${status === 'DENIED' ? 'text-red-500' : 'text-[#00f0ff]'}`}>
-                {result.overallDecision} {renderStatusIcon(result.overallDecision)}
+              <div className={`flex items-center gap-2 font-bold ${status === 'DENIED' ? 'text-red-500 text-[10px]' : 'text-[#00f0ff]'}`}>
+                {status === 'DENIED' ? 'SETTLEMENT BLOCKED NO TRANSACTION BROADCAST' : status === 'VERIFIED' ? 'AUTHORIZED' : result.overallDecision} {renderStatusIcon(result.overallDecision)}
               </div>
             </div>
           </div>

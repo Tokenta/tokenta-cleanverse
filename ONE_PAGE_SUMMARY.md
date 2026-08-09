@@ -28,14 +28,14 @@ Chain ID: 10143
 
 ## EVIDENCE
 - **Live URL:** [https://cleanverse.tokenta.space](https://cleanverse.tokenta.space)
-- **GitHub URL:** (To be provided)
+- **GitHub URL:** [https://github.com/Tokenta/tokenta-cleanverse](https://github.com/Tokenta/tokenta-cleanverse)
 - **Important Contracts:**
   - **Tokenta Pool:** `0x85ed51dc9db2f98bca5aa913c9857a3bd017e6b0`
   - **Tokenta CVA:** `0x2ecd60dc0fe611c60bd241f46943b2813abb243f`
   - **Cleanverse Validator:** `0xaC7e5179C2C7f03f209136886c172eb34F161792`
   - **A-Token Policy:** `0x36489be45fa84f70a0c2bdb11d824be608cb12dd`
 - **Important Transaction Hashes:**
-  - (To be updated after smoke test)
+  - Positive CVA Transfer: `0xc633aa34ee5ab19c77b7de07ce8712e46f0dfba8b67d2c025a521d96f8eb39ca`
 
 ## SCALABILITY
 Rules and settlement adapter are isolated from Tokenta's matching/marketplace layer, allowing additional assets, policy profiles, and supported Cleanverse chains. By encapsulating Cleanverse logic within the `CVASettlementAdapter` and `ComplianceOrchestrator`, Tokenta can seamlessly integrate new chains and assets without redesigning the core order book.
