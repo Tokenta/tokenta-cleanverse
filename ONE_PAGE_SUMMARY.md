@@ -20,7 +20,7 @@ When both counterparties are verified and satisfy the RuleV2 policy, the CVA set
 
 ## NEGATIVE CASE
 **Ineligible participant → settlement blocked → zero value moved**
-If either participant is missing a valid CVI A-Pass or fails the strict RuleV2 check, the Cleanverse backend integration returns `POLICY_DENIED`. The Tokenta compliance orchestrator prevents the transaction from broadcasting, and the UI visually reports the denial reason to the user.
+If either participant is missing a valid CVI A-Pass or fails the strict RuleV2 check, the Cleanverse backend integration returns `POLICY_DENIED`. The Tokenta compliance orchestrator explicitly blocks the transaction. **An ineligible counterparty is rejected before broadcast, preventing prohibited value movement and unnecessary gas expenditure.** No CVA contract calls are made.
 
 ## DEPLOYED CHAIN
 **Monad Testnet**

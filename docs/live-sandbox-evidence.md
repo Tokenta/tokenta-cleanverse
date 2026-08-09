@@ -4,10 +4,16 @@
 - bytecode: non-empty  
 - decoded owner: 0x175F23fc76159628c340663DB1896D614501F971 
 
-## ON-CHAIN getRulesV2 DECODED EVIDENCE
+## ON-CHAIN getRulesV2 DECODED EVIDENCE (RuleV2[])
 - allowedGroup: 0x0000
 - allowedSubGroup: 0x0000
 - minTier: 0
-- minSubTier: 0
+- minSubTier: 50
 - isBlackList: false
-- countryBitmap: 50 
+- countryBitmap: 0 
+
+## PRE-TRANSACTION POLICY EVALUATION EVIDENCE
+- eligible A-Pass (subTier 60) → PASS
+- ineligible A-Pass (subTier 9) → DENY
+
+An ineligible counterparty is rejected before broadcast, preventing prohibited value movement and unnecessary gas expenditure.

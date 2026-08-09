@@ -39,7 +39,7 @@ The settlement asset (`TokentaCVA`) restricts unauthorized transfers. Value cann
 1. An ineligible wallet (or missing CVI credentials) attempts a trade.
 2. Cleanverse evaluates the identity against the strict RuleV2 matrix and returns `POLICY_DENIED`.
 3. The Tokenta backend explicitly blocks the escrow execution.
-4. **Zero value moves.** The transaction reverts/aborts before broadcasting to the blockchain.
+4. **Zero value moves.** An ineligible counterparty is rejected before broadcast, preventing prohibited value movement and unnecessary gas expenditure.
 
 ---
 
@@ -92,6 +92,9 @@ npx tsx scripts/test-tokenta-demo.ts
 
 ## Security Architecture
 The application employs a **server-side fail-closed** compliance model. Secrets are safely injected via environment variables (`.env`) and never exposed to the frontend. The frontend `ComplianceShield` component only displays diagnostic compliance data retrieved through secure server-side API endpoints, preventing any frontend bypass.
+
+**Note**: Live Cleanverse sandbox API calls are temporarily unavailable while the sandbox credential is being rotated. Verified Monad Testnet integration evidence and transaction hashes are included below.
+
 
 ## Scalability Path
 The compliance rules and the `CVASettlementAdapter` are entirely isolated from Tokenta's core matching and marketplace layers. This allows Tokenta to effortlessly support additional assets, complex regulatory policy profiles, and integration with future Cleanverse deployments on Monad Mainnet without rewriting the order book logic.
