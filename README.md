@@ -51,8 +51,9 @@ The settlement asset (`TokentaCVA`) restricts unauthorized transfers. Value cann
 - **Cleanverse Validator:** `0xaC7e5179C2C7f03f209136886c172eb34F161792`
 - **A-Token Policy:** `0x36489be45fa84f70a0c2bdb11d824be608cb12dd`
 
-**Live Demo URL:** [https://cleanverse.tokenta.space](https://cleanverse.tokenta.space) *(Coming Soon)*
-**Public Transaction Evidence:** *(To be updated post-deployment)*
+**Live Demo URL:** [https://tokenta-terminal.vercel.app](https://tokenta-terminal.vercel.app)
+**Backend API URL:** [https://tokenta-terminal-api.onrender.com](https://tokenta-terminal-api.onrender.com)
+**Public Transaction Evidence:** [0xc633aa34ee5ab19c77b7de07ce8712e46f0dfba8b67d2c025a521d96f8eb39ca](https://testnet.monadexplorer.com/tx/0xc633aa34ee5ab19c77b7de07ce8712e46f0dfba8b67d2c025a521d96f8eb39ca)
 
 ---
 
