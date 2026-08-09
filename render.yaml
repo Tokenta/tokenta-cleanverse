@@ -43,11 +43,11 @@ services:
       - key: PROOF_ANCHOR_RPC_URL
         value: "https://sepolia.base.org"
       - key: SETTLEMENT_NETWORK
-        value: "base-sepolia"
+        value: "monad-testnet"
       - key: SETTLEMENT_CHAIN_ID
-        value: "84532"
+        value: "10143"
       - key: SETTLEMENT_RPC_URL
-        value: "https://sepolia.base.org"
+        value: "https://testnet-rpc.monad.xyz/"
       - key: SETTLEMENT_DRY_RUN
         value: "true"
       - key: ESCROW_WALLET
@@ -59,4 +59,4 @@ services:
       - key: TERMINAL_TIMEZONE_IP_LOOKUP
         value: "false"
       - key: CORS_ORIGIN
-        value: "https://terminal.tokenta.space,https://www.terminal.tokenta.space,https://tokenta-terminal.vercel.app"
+        value: "https://terminal.tokenta.space,https://www.terminal.tokenta.space,https://tokenta-terminal.vercel.app,https://cleanverse.tokenta.space"
