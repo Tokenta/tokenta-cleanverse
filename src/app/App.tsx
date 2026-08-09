@@ -370,6 +370,7 @@ function TerminalApp() {
   useEffect(() => {
     if (transitionMode) return;
     if (localStorage.getItem(TOUR_STORAGE_KEY)) return;
+    if (typeof window !== "undefined" && window.location.pathname === "/cleanverse-demo") return;
     const timer = window.setTimeout(() => setTourOpen(true), 900);
     return () => window.clearTimeout(timer);
   }, [transitionMode]);

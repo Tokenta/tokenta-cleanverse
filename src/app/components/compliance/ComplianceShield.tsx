@@ -128,7 +128,13 @@ export function ComplianceShield({ orderId, children }: ComplianceShieldProps) {
 
           <div className="space-y-3">
             <div className="flex justify-between items-center bg-white/5 p-2 rounded">
-              <span className="text-gray-400">POLICY <span className="text-[10px] text-gray-500">(RuleV2 minSubTier: 50)</span></span>
+              <span className="text-gray-400">PARTICIPANT SUBTIER</span>
+              <div className="flex items-center gap-2 text-white">
+                {(result as any).buyerSubTier ?? '—'}
+              </div>
+            </div>
+            <div className="flex justify-between items-center bg-white/5 p-2 rounded">
+              <span className="text-gray-400">POLICY <span className="text-[10px] text-gray-500">(RuleV2 minSubTier: {(result as any).ruleV2MinSubTier ?? 50})</span></span>
               <div className="flex items-center gap-2 text-white">
                 {result.policyDecision} {renderStatusIcon(result.policyDecision)}
               </div>
@@ -139,10 +145,16 @@ export function ComplianceShield({ orderId, children }: ComplianceShieldProps) {
                 0x2ecd...243f <Lock className="w-3 h-3 text-[#00f0ff]" />
               </div>
             </div>
+            <div className="flex justify-between items-center bg-white/5 p-2 rounded">
+              <span className="text-gray-400">TX EVIDENCE <span className="text-[10px] text-gray-500">(Monad Testnet)</span></span>
+              <div className="flex items-center gap-2 text-white text-[10px] truncate max-w-[120px]" title={status === 'DENIED' ? 'No broadcast' : '0xc633aa34ee5ab19c77b7de07ce8712e46f0dfba8b67d2c025a521d96f8eb39ca'}>
+                {status === 'DENIED' ? 'NO BROADCAST' : '0xc633...39ca'} <Lock className="w-3 h-3 text-[#00f0ff]" />
+              </div>
+            </div>
             <div className={`flex justify-between items-center p-2 rounded border ${status === 'DENIED' ? 'bg-red-500/10 border-red-500/30' : 'bg-[#00f0ff]/10 border-[#00f0ff]/30'}`}>
               <span className="font-bold text-white tracking-widest">FINAL DECISION</span>
               <div className={`flex items-center gap-2 font-bold ${status === 'DENIED' ? 'text-red-500 text-[10px]' : 'text-[#00f0ff]'}`}>
-                {status === 'DENIED' ? 'SETTLEMENT BLOCKED NO TRANSACTION BROADCAST' : status === 'VERIFIED' ? 'AUTHORIZED' : result.overallDecision} {renderStatusIcon(result.overallDecision)}
+                {status === 'DENIED' ? 'SETTLEMENT BLOCKED' : status === 'VERIFIED' ? 'AUTHORIZED' : result.overallDecision} {renderStatusIcon(result.overallDecision)}
               </div>
             </div>
           </div>
@@ -190,7 +202,7 @@ export function ComplianceShield({ orderId, children }: ComplianceShieldProps) {
           </h4>
           <p className="text-sm text-red-300/80 mb-4 max-w-md mx-auto">
             {status === "DENIED" 
-              ? "This transaction has been programmatically blocked by the Cleanverse Hackathon compliance validator smart contract."
+              ? "This settlement was denied by Cleanverse-backed pre-transaction policy enforcement. Tokenta blocked execution before broadcast, so no CVA value moved."
               : "The Cleanverse compliance service is currently unreachable. Our fail-closed security model prevents unverified settlement."}
           </p>
         </div>

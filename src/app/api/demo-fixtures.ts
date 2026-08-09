@@ -28,28 +28,22 @@ export const DEMO_ORDERS: TerminalOrderRow[] = [
     listingId: "cleanverse-verified-asset-001",
     buyerWallet: DEMO_BUYER_WALLET,
     sellerWallet: DEMO_SELLER_WALLET,
-    providerKind: "openai",
-    quotaAllocated: 1000000,
-    purchaseAmountUsdc: 5.0,
+    mode: "PARTIAL",
+    quantity: 1000000,
+    amountUsdc: "5.00",
     status: "SETTLED",
     createdAt: new Date(Date.now() - 3600000).toISOString(),
-    escrowStatus: "SETTLED",
-    // In demo mode we intercept the ComplianceShield data at the OrderDetail component 
-    // or by feeding a specific payload if the terminal fetches compliance data separately.
-    // The instructions say: "ComplianceShield integrated into actual workflow" 
-    // "show real CVA transaction evidence"
   },
   {
     orderId: "ord-demo-denied",
     listingId: "cleanverse-verified-asset-001",
     buyerWallet: DEMO_INELIGIBLE_COUNTERPARTY,
     sellerWallet: DEMO_SELLER_WALLET,
-    providerKind: "openai",
-    quotaAllocated: 500000,
-    purchaseAmountUsdc: 2.5,
-    status: "CANCELLED", // or whatever state fits BLOCKED
+    mode: "PARTIAL",
+    quantity: 500000,
+    amountUsdc: "2.50",
+    status: "CANCELLED", // closest to BLOCKED
     createdAt: new Date(Date.now() - 1800000).toISOString(),
-    escrowStatus: "BLOCKED",
   }
 ];
 
@@ -77,19 +71,22 @@ export const DEMO_COMPLIANCE_CHECKS: Record<string, any> = {
     assetStatus: "VERIFIED",
     buyerIdentityStatus: "VERIFIED",
     sellerIdentityStatus: "VERIFIED",
+    buyerSubTier: 60,
+    ruleV2MinSubTier: 50,
     policyDecision: "PASS",
     overallDecision: "APPROVED",
     reasonCodes: [],
   },
   "ord-demo-denied": {
     assetStatus: "VERIFIED",
-    buyerIdentityStatus: "DENIED",
+    buyerIdentityStatus: "VERIFIED", // Must be VERIFIED, policy fails it
     sellerIdentityStatus: "VERIFIED",
+    buyerSubTier: 9,
+    ruleV2MinSubTier: 50,
     policyDecision: "DENIED",
     overallDecision: "DENIED",
     reasonCodes: [
-      "buyer_subtier_insufficient",
-      "rulev2_policy_failure"
+      "POLICY_DENIED"
     ],
   }
 };
