@@ -13,6 +13,7 @@ import {
 } from "./market-utils";
 import { EnhancedMarketPanel } from "./components/EnhancedMarketPanel";
 import { InventoryView } from "./components/InventoryView";
+import { ComplianceShield } from "./components/compliance/ComplianceShield";
 import {
   MarketFilterSidebar,
   AccessMethodBadge,
@@ -1181,16 +1182,18 @@ function EscrowView({
 
                 {/* Step 1 action — BUY: on-chain USDC transfer to escrow wallet */}
                 {active && stepNum === 1 && mode === "BUY" && activeOrderId && (
-                  <OnChainLockButton
-                    amountUsdc={amountUsdc}
-                    state={escrowFunding.state}
-                    txHash={escrowFunding.txHash}
-                    error={escrowFunding.error}
-                    isConnected={isConnected}
-                    onCorrectChain={onCorrectChain}
-                    onRun={() => void handleFundOnChain()}
-                    onReset={() => escrowFunding.reset()}
-                  />
+                  <ComplianceShield orderId={activeOrderId}>
+                    <OnChainLockButton
+                      amountUsdc={amountUsdc}
+                      state={escrowFunding.state}
+                      txHash={escrowFunding.txHash}
+                      error={escrowFunding.error}
+                      isConnected={isConnected}
+                      onCorrectChain={onCorrectChain}
+                      onRun={() => void handleFundOnChain()}
+                      onReset={() => escrowFunding.reset()}
+                    />
+                  </ComplianceShield>
                 )}
 
                 {/* Step 3 action — BUY: confirm receipt and release */}
@@ -1199,14 +1202,16 @@ function EscrowView({
                     {!busy && (
                       <span className="absolute inset-0 animate-ping rounded-none border border-white/40 pointer-events-none" />
                     )}
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => void handleRelease()}
-                      className="relative w-full border border-white bg-white py-1.5 text-[8px] tracking-[0.12em] text-black hover:bg-white/90 disabled:opacity-40"
-                    >
-                      {busy ? "CONFIRMING…" : "CONFIRM RECEIPT"}
-                    </button>
+                    <ComplianceShield orderId={activeOrderId}>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void handleRelease()}
+                        className="relative w-full border border-white bg-white py-1.5 text-[8px] tracking-[0.12em] text-black hover:bg-white/90 disabled:opacity-40"
+                      >
+                        {busy ? "CONFIRMING…" : "CONFIRM RECEIPT"}
+                      </button>
+                    </ComplianceShield>
                   </div>
                 )}
 
