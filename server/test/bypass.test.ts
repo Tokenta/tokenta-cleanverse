@@ -33,7 +33,7 @@ describe('Server-Side Compliance Bypass Test', () => {
 
   beforeAll(() => {
     process.env.CLEANVERSE_API_ID = 'APP20260614112550LIDZXM';
-    process.env.CLEANVERSE_API_KEY = '***REMOVED-CLEANVERSE-SECRET***';
+    process.env.CLEANVERSE_API_KEY = 'test-cleanverse-key';
 
     // Mock the order for unverified buyer
     const o1 = createTerminalOrder({
