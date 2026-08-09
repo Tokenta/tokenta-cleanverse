@@ -24,16 +24,17 @@
     "swagger:export": "tsx scripts/export-openapi.ts"
   },
   "dependencies": {
-    "dotenv": "^16.6.1",
     "@hono/node-server": "^1.14.4",
     "@prisma/client": "^6.8.2",
     "bullmq": "^5.76.10",
+    "dotenv": "^16.6.1",
     "hono": "^4.7.10",
     "ioredis": "^5.10.1",
     "viem": "^2.50.4"
   },
   "devDependencies": {
     "prisma": "^6.8.2",
+    "solc": "^0.8.36",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3",
     "vitest": "^3.1.4"
