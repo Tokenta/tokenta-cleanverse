@@ -1,10 +1,25 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createTerminalOrder } from "../terminal/orders-store.js";
 import "../jobs/worker.js";
 import app from "./server.js";
 import { resetAuditForTest } from "../security/audit-log.js";
 import { signEscrowPayload } from "../security/escrow-signature.js";
 import { resetEscrowsForTest } from "../orders/escrow.js";
 import { pollJobUntilTerminal } from "../test/helpers.js";
+
+vi.mock("../services/ComplianceOrchestrator.js", () => ({
+  ComplianceOrchestrator: vi.fn().mockImplementation(() => ({
+    evaluateTradeCompliance: vi.fn().mockResolvedValue({ overallDecision: "APPROVED" })
+  }))
+}));
+
+vi.mock("../integrations/cleanverse/CVASettlementAdapter.js", () => ({
+  CVASettlementAdapter: vi.fn().mockImplementation(() => ({
+    evaluateSettlement: vi.fn().mockResolvedValue({ state: "APPROVED" }),
+    prepareTransfer: vi.fn().mockReturnValue({ to: "0xMock", data: "0xMock", chainId: 10143 })
+  })),
+  SettlementState: { APPROVED: "APPROVED", POLICY_DENIED: "POLICY_DENIED" }
+}));
 
 const MOCK_KEY = "sk-mock-admin-audit-api";
 
@@ -41,9 +56,19 @@ describe("admin audit-log API", () => {
     });
 
     process.env.REQUIRE_ESCROW_SIGNATURE = "true";
-    process.env.ESCROW_SIGNATURE_SECRET = "audit-api-escrow";
-    const orderId = "ord_audit_1";
-    const amount = "25.00";
+    process.env.ESCROW_SIGNATURE_SECRET = "admin-audit-test";
+    
+    const { orderId } = createTerminalOrder({
+      listingId: "mock-listing",
+      buyerWallet: "0xBuyer",
+      sellerWallet: "0xSeller",
+      mode: "BUYOUT",
+      quantity: 1,
+      amountUsdc: "10.00"
+    });
+
+    const amount = "10.00";
+    const fundSig = signEscrowPayload(orderId, amount, "fund");
     await app.request(`/api/v1/orders/${orderId}/escrow/fund`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

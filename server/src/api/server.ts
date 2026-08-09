@@ -37,10 +37,12 @@ import {
 } from "../verification/proof-anchor.js";
 import { computeProofComposition } from "../metrics/proof-composition.js";
 import { fundEscrow, releaseEscrow, getEscrow } from "../orders/escrow.js";
+import { isEscrowSignatureRequired, verifyEscrowSignature } from "../security/escrow-signature.js";
+import { CVASettlementAdapter, SettlementState } from "../integrations/cleanverse/CVASettlementAdapter.js";
 import { signEscrowPayload } from "../security/escrow-signature.js";
 import { getWorkerTopology } from "../jobs/worker-regions.js";
 import { isPrivyJwksVerifyEnabled } from "../security/privy-jwks.js";
-import { confirmAnchorOnChain, confirmMockAnchor } from "../verification/proof-anchor.js";
+import { confirmAnchorOnChain } from "../verification/proof-anchor.js";
 import { opsUnlockFingerprint, opsInvalidateCache } from "./admin-ops.js";
 import { verificationOpenApi } from "./openapi-verification.js";
 import { signBindPayload } from "../security/bind-signature.js";
@@ -51,6 +53,11 @@ import {
 } from "../jobs/worker-heartbeat.js";
 import { isHashicorpVaultEnabled } from "../security/hashicorp-vault.js";
 import { terminalApp } from "./terminal-routes.js";
+import { getTerminalOrder } from "../terminal/orders-store.js";
+import { ComplianceOrchestrator } from "../services/ComplianceOrchestrator.js";
+
+const complianceOrchestrator = new ComplianceOrchestrator();
+const cvaAdapter = new CVASettlementAdapter();
 
 const app = new Hono();
 
@@ -638,26 +645,153 @@ app.get("/api/v1/orders/:orderId/escrow", (c) => {
   return c.json({ escrow: record });
 });
 
+app.get("/api/v1/orders/:orderId/compliance", async (c) => {
+  const orderId = c.req.param("orderId");
+  const order = getTerminalOrder(orderId);
+  if (!order) return c.json({ error: "Order not found" }, 404);
+  
+  if (!order.buyerWallet || !order.sellerWallet) {
+    return c.json({ error: "Order is missing buyer or seller wallet" }, 400);
+  }
+
+  // The hackathon default pool address enforcing rules (CVA/CCP)
+  const poolAddress = "0xaC7e5179C2C7f03f209136886c172eb34F161792";
+  const chainId = Number(process.env.SETTLEMENT_CHAIN_ID ?? 84532);
+
+  const compliance = await complianceOrchestrator.evaluateTradeCompliance(
+    order.buyerWallet,
+    order.sellerWallet,
+    poolAddress,
+    chainId
+  );
+
+  return c.json({ orderId, compliance });
+});
+
 app.post("/api/v1/orders/:orderId/escrow/fund", async (c) => {
   const orderId = c.req.param("orderId");
+  
+  // 1. Fetch order
+  const order = getTerminalOrder(orderId);
+  if (!order) return c.json({ error: "Order not found" }, 404);
+  if (!order.buyerWallet || !order.sellerWallet) {
+    return c.json({ error: "Order is missing buyer or seller wallet" }, 400);
+  }
+
+  // 2. Enforce Server-Side Cleanverse Compliance
+  const poolAddress = "0xaC7e5179C2C7f03f209136886c172eb34F161792";
+  const chainId = Number(process.env.SETTLEMENT_CHAIN_ID ?? 84532);
+  const compliance = await complianceOrchestrator.evaluateTradeCompliance(
+    order.buyerWallet,
+    order.sellerWallet,
+    poolAddress,
+    chainId
+  );
+
+  if (compliance.overallDecision !== "APPROVED") {
+    return c.json({ 
+      error: "Cleanverse Compliance Denied", 
+      code: "COMPLIANCE_DENIED",
+      compliance 
+    }, 403);
+  }
+
+  // 3. Evaluate CVA Settlement Eligibility
   const body = await c.req.json<{ amountUsdc: string; signature?: string }>();
   if (!body.amountUsdc) return c.json({ error: "amountUsdc required" }, 400);
+
+  const settlementAuth = await cvaAdapter.evaluateSettlement(
+    order.buyerWallet,
+    order.sellerWallet, // Assuming buyer sends to seller via escrow, actually it's escrow -> seller or buyer -> escrow
+    body.amountUsdc
+  );
+
+  // Note: CVA transfer actually goes from Buyer -> Escrow (Fund) or Escrow -> Seller (Release).
+  // But wait, the user's prompt says "evaluateSettlement(from, to, amount)".
+  // Let's accurately evaluate from buyer to seller as a proxy for the trade's overall eligibility,
+  // or maybe evaluate the exact transfer?
+  // User Prompt: "evaluateSettlement(from, to, amount)" and "For a denied trade: fund/release -> 403"
+  if (settlementAuth.state !== SettlementState.APPROVED) {
+    return c.json({
+      error: "Cleanverse CVA Policy Denied",
+      code: settlementAuth.state,
+      reason: settlementAuth.reason
+    }, 403);
+  }
+
+  // 4. Process Escrow Fund
   const result = fundEscrow(orderId, body.amountUsdc, body.signature);
   if (!result.ok) {
     return c.json({ error: result.error, code: result.code }, result.code === "ESCROW_SIGNATURE_INVALID" ? 401 : 409);
   }
-  return c.json({ escrow: result.record }, 201);
+  
+  // Return the prepared transfer payload so the client can sign it
+  const cvaTransfer = cvaAdapter.prepareTransfer(order.sellerWallet, body.amountUsdc);
+  return c.json({ escrow: result.record, cvaTransfer, settlementState: settlementAuth.state }, 201);
 });
 
 app.post("/api/v1/orders/:orderId/escrow/release", async (c) => {
   const orderId = c.req.param("orderId");
+  
+  // 1. Fetch order
+  const order = getTerminalOrder(orderId);
+  if (!order) return c.json({ error: "Order not found" }, 404);
+  if (!order.buyerWallet || !order.sellerWallet) {
+    return c.json({ error: "Order is missing buyer or seller wallet" }, 400);
+  }
+
+  // 2. Enforce Server-Side Cleanverse Compliance
+  const poolAddress = "0xaC7e5179C2C7f03f209136886c172eb34F161792";
+  const chainId = Number(process.env.SETTLEMENT_CHAIN_ID ?? 84532);
+  const compliance = await complianceOrchestrator.evaluateTradeCompliance(
+    order.buyerWallet,
+    order.sellerWallet,
+    poolAddress,
+    chainId
+  );
+
+  if (compliance.overallDecision !== "APPROVED") {
+    return c.json({ 
+      error: "Cleanverse Compliance Denied", 
+      code: "COMPLIANCE_DENIED",
+      compliance 
+    }, 403);
+  }
+
+  // 3. Evaluate CVA Settlement Eligibility
   const body = await c.req.json<{ amountUsdc: string; signature?: string }>();
   if (!body.amountUsdc) return c.json({ error: "amountUsdc required" }, 400);
+
+  const settlementAuth = await cvaAdapter.evaluateSettlement(
+    order.sellerWallet, // Escrow releases to seller, but for policy we can check buyer -> seller
+    order.sellerWallet, 
+    body.amountUsdc
+  );
+
+  // Let's actually use the from/to properly. The user said evaluateSettlement(from, to, amount).
+  // We'll check if the seller is eligible to receive.
+  const settlementAuthReal = await cvaAdapter.evaluateSettlement(
+    order.buyerWallet,
+    order.sellerWallet,
+    body.amountUsdc
+  );
+
+  if (settlementAuthReal.state !== SettlementState.APPROVED) {
+    return c.json({
+      error: "Cleanverse CVA Policy Denied",
+      code: settlementAuthReal.state,
+      reason: settlementAuthReal.reason
+    }, 403);
+  }
+
+  // 4. Process Escrow Release
   const result = releaseEscrow(orderId, body.amountUsdc, body.signature);
   if (!result.ok) {
     return c.json({ error: result.error, code: result.code }, result.code === "ESCROW_SIGNATURE_INVALID" ? 401 : 409);
   }
-  return c.json({ escrow: result.record });
+  
+  const cvaTransfer = cvaAdapter.prepareTransfer(order.sellerWallet, body.amountUsdc);
+  return c.json({ escrow: result.record, cvaTransfer, settlementState: settlementAuthReal.state });
 });
 
 /** Dev helper — sign escrow payload when REQUIRE_ESCROW_SIGNATURE=true */

@@ -1,7 +1,22 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createTerminalOrder } from "../terminal/orders-store.js";
 import app from "./server.js";
 import { resetEscrowsForTest } from "../orders/escrow.js";
 import { signEscrowPayload } from "../security/escrow-signature.js";
+
+vi.mock("../services/ComplianceOrchestrator.js", () => ({
+  ComplianceOrchestrator: vi.fn().mockImplementation(() => ({
+    evaluateTradeCompliance: vi.fn().mockResolvedValue({ overallDecision: "APPROVED" })
+  }))
+}));
+
+vi.mock("../integrations/cleanverse/CVASettlementAdapter.js", () => ({
+  CVASettlementAdapter: vi.fn().mockImplementation(() => ({
+    evaluateSettlement: vi.fn().mockResolvedValue({ state: "APPROVED" }),
+    prepareTransfer: vi.fn().mockReturnValue({ to: "0xMock", data: "0xMock", chainId: 10143 })
+  })),
+  SettlementState: { APPROVED: "APPROVED", POLICY_DENIED: "POLICY_DENIED" }
+}));
 
 describe("escrow API", () => {
   beforeEach(() => {
@@ -12,7 +27,15 @@ describe("escrow API", () => {
   it("funds and releases escrow", async () => {
     process.env.REQUIRE_ESCROW_SIGNATURE = "true";
     process.env.ESCROW_SIGNATURE_SECRET = "escrow-api-test";
-    const orderId = "ord_api_1";
+    const { orderId } = createTerminalOrder({
+      listingId: "mock-listing",
+      buyerWallet: "0xBuyer",
+      sellerWallet: "0xSeller",
+      mode: "BUYOUT",
+      quantity: 1,
+      amountUsdc: "50.00"
+    });
+
     const amount = "50.00";
     const fundSig = signEscrowPayload(orderId, amount, "fund");
 
