@@ -93,8 +93,5 @@ npx tsx scripts/test-tokenta-demo.ts
 ## Security Architecture
 The application employs a **server-side fail-closed** compliance model. Secrets are safely injected via environment variables (`.env`) and never exposed to the frontend. The frontend `ComplianceShield` component only displays diagnostic compliance data retrieved through secure server-side API endpoints, preventing any frontend bypass.
 
-**Note**: Live Cleanverse sandbox API calls are temporarily unavailable while the sandbox credential is being rotated. Verified Monad Testnet integration evidence and transaction hashes are included below.
-
-
 ## Scalability Path
 The compliance rules and the `CVASettlementAdapter` are entirely isolated from Tokenta's core matching and marketplace layers. This allows Tokenta to effortlessly support additional assets, complex regulatory policy profiles, and integration with future Cleanverse deployments on Monad Mainnet without rewriting the order book logic.
