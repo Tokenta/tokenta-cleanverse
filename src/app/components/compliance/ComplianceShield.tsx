@@ -25,7 +25,29 @@ export function ComplianceShield({ orderId, children }: ComplianceShieldProps) {
 
     async function checkCompliance() {
       try {
-        const apiUrl = import.meta.env.VITE_API_URL || "http://localhost:8787";
+        // --- DEMOSMITH INTERCEPT ---
+        const isDemoMode = typeof window !== "undefined" && window.location.pathname === "/cleanverse-demo";
+        if (isDemoMode) {
+          const { DEMO_COMPLIANCE_CHECKS } = await import("../../api/demo-fixtures");
+          const fixture = DEMO_COMPLIANCE_CHECKS[orderId];
+          if (!mounted) return;
+          if (fixture) {
+            setResult(fixture);
+            if (fixture.overallDecision === "APPROVED") setStatus("VERIFIED");
+            else if (fixture.overallDecision === "DENIED") setStatus("DENIED");
+            else setStatus("UNAVAILABLE");
+          } else {
+            setStatus("UNAVAILABLE");
+          }
+          return;
+        }
+        // ---------------------------
+
+        let apiUrl = "https://cleanverse.tokenta.space";
+        if (import.meta.env.VITE_CLEANVERSE_API_URL) {
+          apiUrl = import.meta.env.VITE_CLEANVERSE_API_URL;
+        }
+
         const res = await fetch(`${apiUrl}/api/v1/orders/${orderId}/compliance`);
         if (!res.ok) {
           if (mounted) setStatus("UNAVAILABLE");

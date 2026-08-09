@@ -24,3 +24,4 @@ scratch/
 server/scripts/raw-rule-query.ts  
 server/scripts/test-abi-array.ts  
 server/scripts/test-abi.ts  
+.env*

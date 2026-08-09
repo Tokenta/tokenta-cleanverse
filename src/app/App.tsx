@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useRef, useState, useMemo, type FormEvent } from "react";
 import { useAccount } from "wagmi";
+import { PrivyProvider } from "@privy-io/react-auth";
+import { WagmiProvider } from "@privy-io/wagmi";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "motion/react";
 import {
   ArrowUpRight, ArrowDownRight, Circle, Activity, Boxes, ShieldCheck,
@@ -139,6 +142,9 @@ import {
   getInitialSidebarOpen,
   persistSidebarOpen,
 } from "./components/SideNav";
+import { DemoSessionProvider } from "./context/DemoSessionContext";
+import { privyAppId, privyConfig } from "./privy-config";
+import { wagmiConfig } from "./web3/wagmi-config";
 import { Panel, Tag, Pulse, resultTagTone } from "./ui-primitives";
 import { useZoomLevel } from "./hooks/useZoomLevel";
 import { TokentaScrollArea } from "./components/TokentaScrollArea";
@@ -147,6 +153,12 @@ import { ReputationLevelBadge } from "./components/ReputationLevelCard";
 import { ZoomWarningBanner } from "./components/ZoomWarningBanner";
 
 const SESSION_BOOT_KEY = "tokenta-session-booted";
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: { staleTime: 15_000, refetchOnWindowFocus: false },
+  },
+});
 
 function TerminalLoadingScreen() {
   return (
@@ -164,21 +176,41 @@ function formatFeedTimestamp(input: string): string {
   return d.toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
-export default function App() {
+export default function App({ demoMode = false }: { demoMode?: boolean }) {
+  if (!demoMode && !privyAppId) {
+    throw new Error("Missing VITE_PRIVY_APP_ID. Add it to .env (see .env.example).");
+  }
+
+  // We unconditionally render PrivyProvider and WagmiProvider to avoid complex 
+  // dynamic imports or splitting, but in demo mode we don't prompt for login.
+  return (
+    <PrivyProvider appId={privyAppId ?? "dummy"} config={privyConfig}>
+      <QueryClientProvider client={queryClient}>
+        <WagmiProvider config={wagmiConfig}>
+          <AppInner demoMode={demoMode} />
+        </WagmiProvider>
+      </QueryClientProvider>
+    </PrivyProvider>
+  );
+}
+
+function AppInner({ demoMode }: { demoMode: boolean }) {
   const { ready } = usePrivy();
 
-  if (!ready) {
+  if (!ready && !demoMode) {
     return <TerminalLoadingScreen />;
   }
 
   return (
-    <AuthProvider>
-      <TerminalToastProvider>
-        <TerminalErrorBoundary>
-          <TerminalApp />
-        </TerminalErrorBoundary>
-      </TerminalToastProvider>
-    </AuthProvider>
+    <DemoSessionProvider isDemoMode={demoMode}>
+      <AuthProvider>
+        <TerminalToastProvider>
+          <TerminalErrorBoundary>
+            <TerminalApp />
+          </TerminalErrorBoundary>
+        </TerminalToastProvider>
+      </AuthProvider>
+    </DemoSessionProvider>
   );
 }
 

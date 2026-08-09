@@ -22,6 +22,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { parseUnits, type Address, type Hash } from "viem";
 import { useAccount, useSwitchChain, useWriteContract } from "wagmi";
 import { useWaitForTransactionReceipt } from "wagmi";
+import { useDemoSession } from "../context/DemoSessionContext";
 
 import {
   ACTIVE_CHAIN_ID,
@@ -46,15 +47,11 @@ export interface EscrowFundingResult {
   txHash: Hash | null;
   error: string | null;
   reset: () => void;
-  /**
-   * Submit a USDC transfer to the configured escrow wallet.
-   * Returns the tx hash once the user has signed and wagmi has broadcast it.
-   * Resolves to `null` if the user rejects or a precondition fails.
-   */
   send: (amountUsdc: string) => Promise<Hash | null>;
 }
 
 export function useEscrowFunding(): EscrowFundingResult {
+  const { isDemoMode } = useDemoSession();
   const { address, isConnected, chainId } = useAccount();
   const { switchChainAsync } = useSwitchChain();
   const { writeContractAsync } = useWriteContract();
@@ -98,6 +95,13 @@ export function useEscrowFunding(): EscrowFundingResult {
 
       // --- Pre-flight checks (cheap to fail) -------------------------------------
       setState("preparing");
+      
+      if (isDemoMode) {
+        setError("Action disabled in demo mode.");
+        setState("error");
+        return null;
+      }
+      
       if (!isConnected || !address) {
         setError("Connect your wallet first.");
         setState("error");

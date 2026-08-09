@@ -209,6 +209,11 @@ export async function createListing(body: {
 }
 
 export async function fetchMarketListings(): Promise<MarketListingRow[]> {
+  const isDemoMode = typeof window !== "undefined" && window.location.pathname === "/cleanverse-demo";
+  if (isDemoMode) {
+    const { DEMO_MARKET_LISTINGS } = await import("./demo-fixtures");
+    return DEMO_MARKET_LISTINGS;
+  }
   try {
     const res = await verificationFetch(
       USE_TERMINAL_API ? "/api/v1/terminal/market/listings" : "/api/v1/market/listings",
@@ -912,6 +917,11 @@ export function computePurchaseAmountUsdc(input: {
 export async function fetchTerminalOrder(
   orderId: string,
 ): Promise<TerminalOrderRow | null> {
+  const isDemoMode = typeof window !== "undefined" && window.location.pathname === "/cleanverse-demo";
+  if (isDemoMode) {
+    const { DEMO_ORDERS } = await import("./demo-fixtures");
+    return DEMO_ORDERS.find(o => o.orderId === orderId) ?? null;
+  }
   try {
     const res = await verificationFetch(`/api/v1/terminal/orders/${orderId}`);
     if (!res.ok) return null;
@@ -925,10 +935,15 @@ export async function fetchTerminalOrder(
 export async function fetchTerminalOrderEscrow(
   orderId: string,
 ): Promise<{ status: string; amountUsdc?: string; fundTxHash?: string; releaseTxHash?: string } | null> {
+  const isDemoMode = typeof window !== "undefined" && window.location.pathname === "/cleanverse-demo";
+  if (isDemoMode) {
+    const { DEMO_ESCROWS } = await import("./demo-fixtures");
+    return DEMO_ESCROWS[orderId] ?? null;
+  }
   try {
     const res = await verificationFetch(`/api/v1/terminal/orders/${orderId}/escrow`);
     if (!res.ok) return null;
-    const data = (await res.json()) as { escrow?: { status: string; amountUsdc?: string } };
+    const data = (await res.json()) as { escrow?: { status: string; amountUsdc?: string; fundTxHash?: string; releaseTxHash?: string } };
     return data.escrow ?? null;
   } catch {
     return null;
@@ -939,6 +954,11 @@ export async function fetchTerminalOrders(opts?: {
   wallet?: string;
   role?: "buyer" | "seller" | "all";
 }): Promise<TerminalOrderRow[]> {
+  const isDemoMode = typeof window !== "undefined" && window.location.pathname === "/cleanverse-demo";
+  if (isDemoMode) {
+    const { DEMO_ORDERS } = await import("./demo-fixtures");
+    return DEMO_ORDERS;
+  }
   try {
     const params = new URLSearchParams();
     if (opts?.wallet) params.set("wallet", opts.wallet);
@@ -1235,6 +1255,27 @@ export interface TerminalNetworkResponse {
 }
 
 export async function fetchTerminalNetwork(): Promise<TerminalNetworkResponse | null> {
+  const isDemoMode = typeof window !== "undefined" && window.location.pathname === "/cleanverse-demo";
+  if (isDemoMode) {
+    return {
+      network: TOKENTA_NETWORK_SLUG,
+      chainId: TOKENTA_CHAIN_ID,
+      explorerUrl: TOKENTA_EXPLORER_URL,
+      contractAddress: null,
+      dryRun: false,
+      treasurySignerConfigured: true,
+      connected: true,
+      blockNumber: 1234567,
+      gasPriceGwei: "0.1",
+      usdcAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      escrowWallet: "0x2ecd60dc0fe611c60bd241f46943b2813abb243f",
+      treasuryWallet: "0x2ecd60dc0fe611c60bd241f46943b2813abb243f",
+      escrowWalletConfigured: true,
+      treasuryWalletConfigured: true,
+      escrowReleaseSignerConfigured: true,
+      escrowOperatorAddress: "0x2ecd60dc0fe611c60bd241f46943b2813abb243f",
+    };
+  }
   try {
     const res = await verificationFetch("/api/v1/terminal/network");
     if (!res.ok) return null;
