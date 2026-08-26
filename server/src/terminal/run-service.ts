@@ -241,10 +241,11 @@ export async function createListingAndJob(body: {
   if (credentialRef) listingStore.setCredentialRef(listing.id, credentialRef);
 
   jobStore.update(job.id, { listingId: listing.id });
-  enqueueJob(job.id);
 
   const listingForDb = listingStore.get(listing.id) ?? listing;
-  void persistListingCreate(listingForDb, job.id).catch(() => {});
+  await persistListingCreate(listingForDb, job.id);
+
+  enqueueJob(job.id);
 
   return {
     ok: true,

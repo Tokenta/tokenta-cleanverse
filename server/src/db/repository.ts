@@ -1,16 +1,168 @@
-import type { VerificationProof } from "../types/verification.js";
-import type { ListingRecord } from "../listings/store.js";
+import {
+  AssetStatus,
+  ListingProviderKind,
+  VerificationJobStatus,
+} from "@prisma/client";
 import type { StoredJob } from "../jobs/store.js";
+import type { ListingRecord } from "../listings/store.js";
+import { getCredentialVault } from "../security/credential-vault.js";
+import type { VerificationProof } from "../types/verification.js";
+import { getPrisma } from "./prisma.js";
 
-/** Database persistence disabled — Terminal uses in-memory stores only. */
+const DEV_WALLET = "0x0000000000000000000000000000000000000001";
+
+function mapProviderKind(kind: string): ListingProviderKind {
+  const normalized = kind.toLowerCase();
+  if (normalized.includes("anthropic")) return ListingProviderKind.ANTHROPIC;
+  if (normalized.includes("google")) return ListingProviderKind.GOOGLE_AI;
+  if (normalized.includes("custom")) return ListingProviderKind.CUSTOM_REST;
+  return ListingProviderKind.OPENAI_COMPATIBLE;
+}
+
+function mapListingStatus(status: ListingRecord["status"]): AssetStatus {
+  switch (status) {
+    case "LIVE":
+      return AssetStatus.LIVE;
+    case "FAILED":
+      return AssetStatus.DELISTED;
+    case "REVIEW":
+    case "DEGRADED":
+      return AssetStatus.PAUSED;
+    default:
+      return AssetStatus.VERIFYING;
+  }
+}
+
+function mapJobStatus(terminal: string | undefined): VerificationJobStatus {
+  return terminal === "FAIL" ? VerificationJobStatus.FAILED : VerificationJobStatus.PASSED;
+}
+
 export async function persistListingCreate(
-  _listing: ListingRecord,
-  _jobId: string,
-): Promise<void> {}
+  listing: ListingRecord,
+  jobId: string,
+): Promise<void> {
+  const prisma = getPrisma();
+  if (!prisma) return;
 
-export async function persistJobStart(_job: StoredJob): Promise<void> {}
+  const wallet = await prisma.wallet.upsert({
+    where: { address: DEV_WALLET },
+    create: { address: DEV_WALLET, preferredRole: "SELLER" },
+    update: {},
+  });
+
+  await prisma.apiListing.create({
+    data: {
+      id: listing.id,
+      publicId: listing.id.slice(-12).toUpperCase(),
+      sellerWalletId: wallet.id,
+      providerKind: mapProviderKind(listing.providerKind),
+      quotaToSell: listing.quotaToSell,
+      quotaUnit: listing.quotaUnit,
+      askPriceUsdc: listing.askPriceUsdc,
+      verifyConsentAt: new Date(),
+      autoListAfterVerify: listing.autoListAfterVerify,
+      status: mapListingStatus(listing.status),
+      credential: {
+        create: {
+          ciphertextRef:
+            listing.credentialRef ??
+            (getCredentialVault() ? `listing/${listing.id}` : `dev-ref-${listing.id}`),
+          keyFingerprint: listing.keyFingerprint,
+        },
+      },
+      verificationJobs: {
+        create: {
+          id: jobId,
+          status: VerificationJobStatus.QUEUED,
+          stepsTotal: 5,
+          keyFingerprint: listing.keyFingerprint,
+        },
+      },
+    },
+  });
+}
+
+export async function persistJobStart(job: StoredJob): Promise<void> {
+  const prisma = getPrisma();
+  if (!prisma) return;
+
+  await prisma.verificationJob.upsert({
+    where: { id: job.id },
+    create: {
+      id: job.id,
+      listingId: job.listingId,
+      status: VerificationJobStatus.RUNNING,
+      stepsTotal: job.stepsTotal,
+      keyFingerprint: job.keyFingerprint,
+      startedAt: job.startedAt ? new Date(job.startedAt) : new Date(),
+    },
+    update: {
+      status: VerificationJobStatus.RUNNING,
+      startedAt: job.startedAt ? new Date(job.startedAt) : new Date(),
+      keyFingerprint: job.keyFingerprint,
+    },
+  });
+}
 
 export async function persistJobCompletion(
-  _job: StoredJob,
-  _proof: VerificationProof,
-): Promise<void> {}
+  job: StoredJob,
+  proof: VerificationProof,
+): Promise<void> {
+  const prisma = getPrisma();
+  if (!prisma) return;
+
+  await prisma.verificationJob.upsert({
+    where: { id: job.id },
+    create: {
+      id: job.id,
+      listingId: job.listingId,
+      status: mapJobStatus(proof.terminalOutcome),
+      stepsCompleted: job.stepsCompleted,
+      keyFingerprint: job.keyFingerprint,
+      terminalOutcome: proof.terminalOutcome,
+      capabilityScore: proof.capabilityScore,
+      trustScore: proof.trustScore,
+      complianceScore: proof.complianceScore,
+      proofHash: proof.proofHash,
+      proofJson: proof as object,
+      costLiability: proof.costLiability,
+      quotaConsumed: proof.totalTokensUsed,
+      failureReason: proof.failureCode ?? proof.failureMessage,
+      startedAt: job.startedAt ? new Date(job.startedAt) : undefined,
+      completedAt: job.completedAt ? new Date(job.completedAt) : new Date(),
+    },
+    update: {
+      status: mapJobStatus(proof.terminalOutcome),
+      stepsCompleted: job.stepsCompleted,
+      keyFingerprint: job.keyFingerprint,
+      terminalOutcome: proof.terminalOutcome,
+      capabilityScore: proof.capabilityScore,
+      trustScore: proof.trustScore,
+      complianceScore: proof.complianceScore,
+      proofHash: proof.proofHash,
+      proofJson: proof as object,
+      costLiability: proof.costLiability,
+      quotaConsumed: proof.totalTokensUsed,
+      failureReason: proof.failureCode ?? proof.failureMessage,
+      startedAt: job.startedAt ? new Date(job.startedAt) : undefined,
+      completedAt: job.completedAt ? new Date(job.completedAt) : new Date(),
+    },
+  });
+
+  if (!job.listingId) return;
+
+  const listing = await prisma.apiListing.findUnique({ where: { id: job.listingId } });
+  if (!listing) return;
+
+  let status = AssetStatus.PAUSED;
+  if (proof.terminalOutcome === "PASS" && listing.autoListAfterVerify) {
+    status = AssetStatus.LIVE;
+  } else if (proof.terminalOutcome === "FAIL") {
+    status = AssetStatus.DELISTED;
+  }
+
+  await prisma.apiListing.update({
+    where: { id: job.listingId },
+    data: { status },
+  });
+}

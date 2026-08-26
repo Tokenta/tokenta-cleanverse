@@ -9,6 +9,8 @@ export interface WorkerRegionInfo {
   active: boolean;
 }
 
+const BULL_QUEUE_PREFIX = "tokenta-verification";
+
 export function getLocalWorkerRegion(): string {
   return process.env.WORKER_REGION ?? "local";
 }
@@ -23,7 +25,7 @@ export function parseWorkerRegions(): string[] {
 
 export function queueNameForRegion(region: string): string {
   const slug = region.toLowerCase().replace(/[^a-z0-9-]/g, "-");
-  return `tokenta:verification:${slug}`;
+  return `${BULL_QUEUE_PREFIX}-${slug}`;
 }
 
 export function bullQueueName(): string {
@@ -31,7 +33,11 @@ export function bullQueueName(): string {
   if (process.env.USE_REGIONAL_QUEUES === "true") {
     return queueNameForRegion(region);
   }
-  return "tokenta:verification:standard";
+  return `${BULL_QUEUE_PREFIX}-standard`;
+}
+
+export function bullDlqName(): string {
+  return `${BULL_QUEUE_PREFIX}-dlq`;
 }
 
 export function getWorkerTopology(): {
