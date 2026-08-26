@@ -7,14 +7,28 @@ on:
     branches: [main, master]
 
 jobs:
+  frontend-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Build frontend
+        run: npm run build
+
   server-tests:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: server
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -56,8 +70,8 @@ jobs:
       USE_DB_PERSISTENCE: "true"
       VERIFICATION_MOCK: "true"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -75,13 +89,14 @@ jobs:
 
   live-openai-smoke:
     runs-on: ubuntu-latest
-    if: ${{ secrets.OPENAI_API_KEY != '' }}
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     defaults:
       run:
         working-directory: server
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -89,11 +104,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Live OpenAI verification smoke (optional secret)
+        if: ${{ env.OPENAI_API_KEY != '' }}
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           RUN_LIVE_OPENAI_SMOKE: "true"
           VERIFICATION_MOCK: "false"
         run: npm run test:live-openai
+      - name: Explain skipped live smoke
+        if: ${{ env.OPENAI_API_KEY == '' }}
+        run: echo "OPENAI_API_KEY is not configured; the optional live smoke test was skipped."
 
   redis-bullmq-smoke:
     runs-on: ubuntu-latest
@@ -116,8 +134,8 @@ jobs:
       VERIFICATION_MOCK: "true"
       RUN_REDIS_BULLMQ_SMOKE: "true"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm

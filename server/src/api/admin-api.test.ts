@@ -28,7 +28,7 @@ describe("admin API", () => {
     };
     expect(topoBody.regionalQueuesEnabled).toBe(true);
     expect(topoBody.regions.length).toBe(2);
-    expect(topoBody.regions[0]?.queueName).toContain("tokenta:verification:");
+    expect(topoBody.regions[0]?.queueName).toContain("tokenta-verification-");
     if (prevRegional === undefined) delete process.env.USE_REGIONAL_QUEUES;
     else process.env.USE_REGIONAL_QUEUES = prevRegional;
     if (prevRegions === undefined) delete process.env.WORKER_REGIONS;

@@ -39,7 +39,6 @@ export async function processJob(jobId: string): Promise<void> {
   const startedAt = new Date().toISOString();
   jobStore.update(jobId, { status: "RUNNING", startedAt });
   const running = jobStore.get(jobId);
-  if (running) void persistJobStart(running).catch(() => {});
   jobStore.emit(jobId, {
     type: "step_started",
     jobId,
@@ -58,6 +57,8 @@ export async function processJob(jobId: string): Promise<void> {
   let lastStep: VerificationStepName = "CONNECTIVITY";
 
   try {
+    if (running) await persistJobStart(running);
+
     const hasKey = await resolveJobApiKey(job);
     if (!hasKey && (!job.request.apiKey || job.request.apiKey.length < 8)) {
       throw new Error("apiKey missing and credentialRef could not be resolved");
@@ -181,9 +182,7 @@ export async function processJob(jobId: string): Promise<void> {
 
     if (job.listingId && proof) {
       listingStore.bindVerification(job.listingId, proof);
-      void persistJobCompletion(job, proof).catch((err) => {
-        console.warn("[persist] job completion failed:", err);
-      });
+      await persistJobCompletion(job, proof);
     }
 
     jobStore.emit(jobId, {

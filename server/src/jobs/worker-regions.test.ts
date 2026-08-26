@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  bullDlqName,
   bullQueueName,
   getWorkerTopology,
   queueNameForRegion,
@@ -13,14 +14,15 @@ describe("worker-regions", () => {
   });
 
   it("uses standard queue by default", () => {
-    expect(bullQueueName()).toBe("tokenta:verification:standard");
+    expect(bullQueueName()).toBe("tokenta-verification-standard");
+    expect(bullDlqName()).toBe("tokenta-verification-dlq");
   });
 
   it("uses regional queue when enabled", () => {
     process.env.WORKER_REGION = "us-east-1";
     process.env.USE_REGIONAL_QUEUES = "true";
-    expect(bullQueueName()).toBe("tokenta:verification:us-east-1");
-    expect(queueNameForRegion("eu-west-1")).toBe("tokenta:verification:eu-west-1");
+    expect(bullQueueName()).toBe("tokenta-verification-us-east-1");
+    expect(queueNameForRegion("eu-west-1")).toBe("tokenta-verification-eu-west-1");
   });
 
   it("lists topology regions", () => {

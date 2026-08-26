@@ -4,13 +4,11 @@
 
 type JobHandler = (jobId: string) => Promise<void>;
 
-import { bullQueueName } from "./worker-regions.js";
+import { bullDlqName, bullQueueName } from "./worker-regions.js";
 
 function queueName(): string {
   return bullQueueName();
 }
-const DLQ_NAME = "tokenta:verification:dlq";
-
 let workerStarted = false;
 let queueInstance: import("bullmq").Queue | null = null;
 
@@ -59,7 +57,7 @@ export function startBullMqConsumer(handler: JobHandler): void {
   void (async () => {
     try {
       const { Worker, Queue } = await import("bullmq");
-      const dlq = new Queue(DLQ_NAME, { connection: connectionOpts() });
+      const dlq = new Queue(bullDlqName(), { connection: connectionOpts() });
 
       const worker = new Worker(
         queueName(),

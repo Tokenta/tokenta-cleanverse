@@ -241,12 +241,10 @@ app.post("/api/v1/listings", async (c) => {
   jobStore.update(job.id, { listingId: listing.id });
   jobRequest.listingId = listing.id;
 
-  enqueueJob(job.id);
-
   const listingForDb = listingStore.get(listing.id) ?? listing;
-  void persistListingCreate(listingForDb, job.id).catch((err) => {
-    console.warn("[persist] listing create failed:", err);
-  });
+  await persistListingCreate(listingForDb, job.id);
+
+  enqueueJob(job.id);
 
   return c.json(
     {
