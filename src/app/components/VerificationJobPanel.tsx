@@ -143,6 +143,9 @@ export function VerificationJobPanel({
     if (proof?.failureCode === "QUOTA_EXHAUSTED") {
       return `${rawError} Add credits to your DeepSeek (or provider) account, then re-run verification.`;
     }
+    if (proof?.failureCode === "MODEL_MISMATCH") {
+      return `${rawError} The endpoint answered as a different model family than claimed. If you bought this key from a reseller, this is a model swap — ask the seller for a genuine key or a refund.`;
+    }
     if (rawError.includes("PROBE_NETWORK_UNREACHABLE") || rawError.includes("NETWORK_UNREACHABLE")) {
       return (
         `${rawError} ` +
@@ -220,6 +223,47 @@ export function VerificationJobPanel({
           <span>{band?.band ?? "—"}</span>
         </div>
       </div>
+
+      {proof?.fingerprint && proof.fingerprint.status !== "skipped" && (
+        <div className="border border-white/10 p-2 space-y-1">
+          <div className="text-[9px] tracking-[0.2em] text-white/40">MODEL IDENTITY</div>
+          <div className="flex items-center justify-between">
+            <span
+              className={
+                proof.fingerprint.status === "match"
+                  ? "text-emerald-300"
+                  : proof.fingerprint.status === "mismatch"
+                    ? "text-red-400"
+                    : "text-amber-300"
+              }
+            >
+              {proof.fingerprint.status.toUpperCase()}
+              {proof.fingerprint.detectedVendor
+                ? ` · detected ${proof.fingerprint.detectedVendor}`
+                : ""}
+            </span>
+            <span className="text-white/40 tabular-nums">
+              {proof.fingerprint.confidence > 0
+                ? `${proof.fingerprint.confidence}% conf`
+                : ""}
+            </span>
+          </div>
+          {proof.fingerprint.responseModel && (
+            <div className="text-white/50">
+              response model:{" "}
+              <span className="text-white/80">{proof.fingerprint.responseModel}</span>
+              {proof.fingerprint.claimedModel
+                ? ` · claimed ${proof.fingerprint.claimedModel}`
+                : ""}
+            </div>
+          )}
+          {proof.fingerprint.evidence.slice(0, 3).map((e) => (
+            <div key={e} className="text-[10px] text-white/35">
+              {e}
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="border border-white/10 p-2">
         <div className="mb-2 text-[9px] tracking-[0.2em] text-white/40">PIPELINE</div>

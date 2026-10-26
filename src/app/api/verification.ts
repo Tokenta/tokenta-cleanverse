@@ -109,7 +109,19 @@ export interface MarketListingRow {
 
 export type TerminalOutcome = "PASS" | "FAIL" | "REVIEW" | "DEGRADED";
 
+export interface FingerprintAssessment {
+  status: "match" | "mismatch" | "inconclusive" | "skipped";
+  claimedModel?: string;
+  claimedFamily?: string;
+  detectedFamily?: string;
+  detectedVendor?: string;
+  responseModel?: string;
+  confidence: number;
+  evidence: string[];
+}
+
 export interface VerificationProof {
+  fingerprint?: FingerprintAssessment;
   jobId: string;
   terminalOutcome: TerminalOutcome;
   capabilityScore: number;
